@@ -62,9 +62,13 @@ def test_upload_video_fails_fast_when_not_configured(monkeypatch):
     """
     from app.publishing import youtube_publisher
 
-    monkeypatch.setattr(youtube_publisher.settings, "youtube_client_id", None)
-    monkeypatch.setattr(youtube_publisher.settings, "youtube_client_secret", None)
-    monkeypatch.setattr(youtube_publisher.settings, "youtube_refresh_token", None)
+    # youtube_client_id/secret/refresh_token are read-only properties
+    # derived from youtube_environment (dev/prod) -- monkeypatch the
+    # underlying dev_* fields they resolve to instead (default
+    # environment is "dev").
+    monkeypatch.setattr(youtube_publisher.settings, "youtube_dev_client_id", None)
+    monkeypatch.setattr(youtube_publisher.settings, "youtube_dev_client_secret", None)
+    monkeypatch.setattr(youtube_publisher.settings, "youtube_dev_refresh_token", None)
 
     with pytest.raises(YouTubeNotConfigured):
         upload_video(

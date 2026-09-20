@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
+from app.config import settings
 from app.content.video_composer import probe_video
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, Story, StoryContent
@@ -642,6 +643,11 @@ def _serialize_episode(db, episode: Episode) -> dict:
         "youtube_url": episode.youtube_url,
         "published_at": episode.published_at,
         "publish_error": episode.publish_error,
+        # Not per-episode data -- read fresh from settings so the
+        # dashboard can show which credential set/channel a Publish
+        # click would actually use, before it's clicked. See
+        # app/config.py's youtube_environment (dev vs prod).
+        "youtube_environment": settings.youtube_environment,
         "primary": primary,
         "backup": backup,
     }

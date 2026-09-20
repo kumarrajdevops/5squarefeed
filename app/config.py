@@ -25,9 +25,38 @@ class Settings(BaseSettings):
     # section for setup steps. Deliberately optional (not required to
     # run the rest of the pipeline) so dev/testing never needs a real
     # YouTube account.
-    youtube_client_id: str | None = None
-    youtube_client_secret: str | None = None
-    youtube_refresh_token: str | None = None
+    #
+    # Two fully separate credential sets (dev vs prod) -- different
+    # Google Cloud OAuth clients AND, per the user's explicit choice,
+    # different destination YouTube channels. Both can be configured
+    # in .env at once; youtube_environment picks which pair is
+    # actually used at runtime, so switching modes never means editing
+    # secrets back and forth. Reason: YouTube's API quota is tracked
+    # per Google Cloud project, not per channel -- sharing one
+    # credential set between dev testing and real publishing risks
+    # burning the day's quota on test uploads and blocking a real
+    # publish.
+    youtube_environment: str = "dev"  # "dev" or "prod"
+
+    youtube_dev_client_id: str | None = None
+    youtube_dev_client_secret: str | None = None
+    youtube_dev_refresh_token: str | None = None
+
+    youtube_prod_client_id: str | None = None
+    youtube_prod_client_secret: str | None = None
+    youtube_prod_refresh_token: str | None = None
+
+    @property
+    def youtube_client_id(self) -> str | None:
+        return self.youtube_prod_client_id if self.youtube_environment == "prod" else self.youtube_dev_client_id
+
+    @property
+    def youtube_client_secret(self) -> str | None:
+        return self.youtube_prod_client_secret if self.youtube_environment == "prod" else self.youtube_dev_client_secret
+
+    @property
+    def youtube_refresh_token(self) -> str | None:
+        return self.youtube_prod_refresh_token if self.youtube_environment == "prod" else self.youtube_dev_refresh_token
 
     @property
     def youtube_configured(self) -> bool:

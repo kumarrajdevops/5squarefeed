@@ -303,6 +303,7 @@ function renderStudioLayout(ep) {
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
         <button class="btn" id="btn-publish" type="button" ${(producing || publishing || published) ? "disabled" : ""}>${publishLabel}</button>
+        <span class="pill youtube-env youtube-env-${ep.youtube_environment}" title="A Publish click uploads to the ${ep.youtube_environment.toUpperCase()} YouTube channel/credentials (app/config.py's YOUTUBE_ENVIRONMENT)">${ep.youtube_environment} channel</span>
       </div>
     </div>
 

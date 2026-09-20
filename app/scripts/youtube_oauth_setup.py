@@ -13,7 +13,17 @@
 # Publishing section for the full setup): a Cloud project with the
 # YouTube Data API v3 enabled, an OAuth consent screen configured, and
 # an OAuth Client ID of type "Desktop app". Put its client_id/secret in
-# .env as YOUTUBE_CLIENT_ID/YOUTUBE_CLIENT_SECRET before running this.
+# .env as YOUTUBE_DEV_CLIENT_ID/YOUTUBE_DEV_CLIENT_SECRET (or the
+# YOUTUBE_PROD_* equivalents) before running this -- whichever pair
+# YOUTUBE_ENVIRONMENT currently points at is what gets used, and this
+# script tells you exactly which one, and which env var to save the
+# resulting refresh token under, so dev and prod never get crossed.
+#
+# Run it TWICE total, once per environment: set YOUTUBE_ENVIRONMENT=dev
+# in .env, run this, save the printed token, then set
+# YOUTUBE_ENVIRONMENT=prod, run it again against the prod OAuth client
+# and the real channel, and save that token too. Both pairs can then
+# coexist in .env -- YOUTUBE_ENVIRONMENT just picks which is live.
 
 from app.config import settings
 
@@ -21,12 +31,24 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 
 def run_oauth_setup() -> None:
+    env = settings.youtube_environment
+    token_var_name = f"YOUTUBE_{env.upper()}_REFRESH_TOKEN"
+
     if not settings.youtube_client_id or not settings.youtube_client_secret:
         print(
-            "YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set in .env "
-            "before running this script -- see README.md's Publishing section."
+            f"YOUTUBE_ENVIRONMENT is currently {env!r}, but "
+            f"YOUTUBE_{env.upper()}_CLIENT_ID and "
+            f"YOUTUBE_{env.upper()}_CLIENT_SECRET aren't both set in .env -- "
+            "see README.md's Publishing section."
         )
         return
+
+    print(f"Running OAuth setup for YOUTUBE_ENVIRONMENT={env!r}.")
+    print(
+        "Make sure you sign in, in the browser window this opens, with the "
+        "Google account that owns the channel you want THIS environment to "
+        "publish to -- dev and prod should be different accounts/channels.\n"
+    )
 
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -45,8 +67,8 @@ def run_oauth_setup() -> None:
     # runs a temporary local server to catch the redirect.
     credentials = flow.run_local_server(port=0)
 
-    print("\nSuccess. Add this line to .env:\n")
-    print(f"YOUTUBE_REFRESH_TOKEN={credentials.refresh_token}\n")
+    print(f"\nSuccess. Add this line to .env:\n")
+    print(f"{token_var_name}={credentials.refresh_token}\n")
 
 
 if __name__ == "__main__":

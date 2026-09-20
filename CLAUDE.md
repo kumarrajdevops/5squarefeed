@@ -119,8 +119,9 @@ Don't re-diagnose from scratch.
   `api` container's `uvicorn --reload` picks up changes automatically —
   no restart needed there.
 - Postgres credentials are `ai_news`/`ai_news` (db `ai_news`), not the
-  `postgres` default: `docker exec 5min-ai-news-postgres-1 psql -U
-  ai_news -d ai_news`.
+  `postgres` default: `docker exec 5squarefeed-postgres-1 psql -U
+  ai_news -d ai_news`. (Container prefix is `5squarefeed-*` since the
+  Compose project rename — see "Project identity" above.)
 - A brand-new `app/tasks/*.py` module must be added to `include=[...]`
   in `app/worker/celery_app.py`, or `.delay()` silently queues a task
   the worker never picks up (confirmed live when the Publishing
@@ -135,6 +136,12 @@ Don't re-diagnose from scratch.
 - On Windows/Git Bash, prefix `docker exec ... ffprobe /app/media/...`
   style commands with `MSYS_NO_PATHCONV=1` or the leading `/` gets
   mangled into a Windows path.
+- Editing `.env` is **not** picked up by `docker compose restart` —
+  Compose only reads `env_file` at container *creation*, not restart.
+  After any `.env` change (e.g. new YouTube credentials), run
+  `docker compose up -d --force-recreate api worker` and confirm with
+  `docker compose exec api python -c "from app.config import settings; print(settings.youtube_configured)"`
+  (or whichever setting changed) before assuming it took effect.
 
 ## Verification checklist after touching the produce/QA pipeline
 

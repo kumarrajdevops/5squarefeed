@@ -29,13 +29,13 @@ until curl -s http://localhost:8000/api/v1/episodes/{episode_id} | grep -q '"vid
 ```
 
 Check the worker's log for the task's completion summary
-(`docker logs 5min-ai-news-worker-1 --tail 20`) — confirm
+(`docker logs 5squarefeed-worker-1 --tail 20`) — confirm
 `stories_failed: 0` and `backups_failed: 0` (or investigate why not).
 
 ## 2. Check AV sync on the combined video
 
 ```bash
-MSYS_NO_PATHCONV=1 docker exec 5min-ai-news-api-1 ffprobe -v error \
+MSYS_NO_PATHCONV=1 docker exec 5squarefeed-api-1 ffprobe -v error \
   -show_entries stream=codec_type,duration -show_entries format=duration \
   -of json /app/media/videos/episode_{episode_id}.mp4
 ```
@@ -49,7 +49,7 @@ assuming it's a new problem.
 ## 3. Spot-check 2-3 individual story clips the same way
 
 ```bash
-MSYS_NO_PATHCONV=1 docker exec 5min-ai-news-api-1 ffprobe -v error \
+MSYS_NO_PATHCONV=1 docker exec 5squarefeed-api-1 ffprobe -v error \
   -show_entries stream=codec_type,duration -of csv=p=0 \
   /app/media/videos/{story_id}.mp4
 ```
@@ -59,7 +59,7 @@ combined video isn't, the bug is in `concat_videos()` or gap-clip
 insertion, not per-story composition — check the gap clip itself too:
 
 ```bash
-MSYS_NO_PATHCONV=1 docker exec 5min-ai-news-api-1 ffprobe -v error \
+MSYS_NO_PATHCONV=1 docker exec 5squarefeed-api-1 ffprobe -v error \
   -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \
   /app/media/videos/_story_gap_*.mp4
 ```

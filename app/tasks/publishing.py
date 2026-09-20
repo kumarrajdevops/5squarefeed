@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, Story
 from app.publishing.youtube_publisher import build_video_metadata, upload_video
@@ -18,7 +19,16 @@ def publish_episode_to_youtube(episode_id: int) -> dict:
     status == "approved" and video_status == "ready" and flipped
     publish_status to "publishing" synchronously before queuing this
     task, same status-flip-in-the-endpoint pattern as Produce/QA.
+
+    Always logs and returns which YOUTUBE_ENVIRONMENT (dev/prod --
+    separate credentials AND separate destination channels, see
+    app/config.py) it actually published under -- a real, easy mistake
+    to make otherwise is publishing to the wrong channel without
+    noticing, since both look identical from inside this task.
     """
+
+    environment = settings.youtube_environment
+    print(f"[publishing] Episode {episode_id}: using YOUTUBE_ENVIRONMENT={environment!r}")
 
     with SessionLocal() as db:
         episode = db.get(Episode, episode_id)
@@ -64,7 +74,17 @@ def publish_episode_to_youtube(episode_id: int) -> dict:
             episode.publish_error = str(exc)
             db.commit()
             print(f"[publishing] Episode {episode_id} publish failed: {exc}")
-            return {"episode_id": episode_id, "status": "failed", "error": str(exc)}
+            return {
+                "episode_id": episode_id,
+                "status": "failed",
+                "error": str(exc),
+                "environment": environment,
+            }
 
-    print(f"[publishing] Episode {episode_id} published: {episode.youtube_url}")
-    return {"episode_id": episode_id, "status": "published", "youtube_url": episode.youtube_url}
+    print(f"[publishing] Episode {episode_id} published ({environment}): {episode.youtube_url}")
+    return {
+        "episode_id": episode_id,
+        "status": "published",
+        "youtube_url": episode.youtube_url,
+        "environment": environment,
+    }

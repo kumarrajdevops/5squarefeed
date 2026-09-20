@@ -425,28 +425,132 @@ automatically on first publish.
 **Requires real Google OAuth credentials, which this project does not
 ship with** -- the one exception to "free/local, no API keys" (see
 above): publishing to a real channel inherently needs a real account.
-One-time setup:
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), create
-   a project, enable the **YouTube Data API v3**, configure an OAuth
-   consent screen, and create an **OAuth Client ID** of type
-   **Desktop app**.
-2. Put its client ID/secret in `.env` as `YOUTUBE_CLIENT_ID` /
-   `YOUTUBE_CLIENT_SECRET`.
-3. On your host machine (not inside Docker -- this needs a real
-   browser), run `python -m app.scripts.youtube_oauth_setup` once. It
-   opens a Google consent screen and prints a refresh token; add it to
-   `.env` as `YOUTUBE_REFRESH_TOKEN`.
+**Dev and prod are deliberately fully separate** -- different Google
+Cloud OAuth clients *and* different destination YouTube channels, not
+just different secrets pointed at the same channel. Reason: YouTube's
+API quota (10,000 units/day by default; one upload costs ~1,600) is
+tracked per Google Cloud project, not per channel -- sharing prod's
+credentials for dev testing risks burning the day's quota on test
+uploads and blocking a real publish. A separate test channel also
+means dev's `private`-visibility test uploads never clutter the real
+channel's video library. `YOUTUBE_ENVIRONMENT` (`dev` or `prod`, in
+`.env`) picks which credential pair is actually live -- both can be
+configured at once, so switching modes never means editing secrets.
+The dashboard shows which one is active as a pill next to the Publish
+button (red/bold for `prod`, impossible to miss).
 
-Until all three are set, `/publish` fails fast with a clear
-`YouTubeNotConfigured` error -- before ever touching the network --
-rather than an opaque auth failure. This is the project's actual
-current state: the integration is fully built and tested (title/
-description generation, the upload call, DB status tracking, dashboard
-polling UI) but has never run against a real YouTube account yet, since
-no credentials exist. Verified live end-to-end up to that boundary: a
-real `/publish` call on an approved episode correctly fails with the
-`YouTubeNotConfigured` message and sets `publish_status = "failed"`.
+**Current real status**: dev is fully set up and verified -- a real
+`/publish` call successfully uploaded episode #9 to the dev channel
+(private visibility), confirmed via the API response
+(`publish_status: "published"`, `publish_error: null`) and the worker
+log explicitly showing `YOUTUBE_ENVIRONMENT='dev'` was used throughout.
+That was the first real network call this integration ever made; the
+whole build up to that point (title/description generation, the upload
+call, DB status tracking, dashboard polling UI, the `YouTubeNotConfigured`
+fail-fast path, dev/prod credential switching) had only been verified
+without real credentials. **Prod is not set up yet** -- repeat the same
+steps below with a `YOUTUBE_PROD_*` pair and the real "5squareFeed"
+channel whenever ready to go live.
+
+### One-time setup (run once per environment: dev now, prod later)
+
+None of this can be done by an AI assistant -- it all needs your own,
+live, authenticated Google session.
+
+**Part 1 -- create the channel** (dev needs its own, separate from
+whatever prod will eventually use):
+
+1. Sign in to [youtube.com](https://youtube.com) as the Gmail that
+   owns this brand (e.g. `5squarefeed@gmail.com`).
+2. Profile picture (top right) -> **Settings** (gear icon).
+3. **"Add or manage your channel(s)"** -> **"Create a channel"**.
+4. Choose **"Use a custom name"** (not your personal name) -- this
+   creates a separate Brand Account channel, not tied to your personal
+   profile, and is what lets one Google account manage multiple
+   distinct channels.
+5. Name it unmistakably not-the-real-thing for dev, e.g.
+   **"5squareFeed Dev"** / **"5squareFeed (Test)"**. Optionally set it
+   unlisted and add a description noting it's an internal test
+   channel. Do the same later for prod with the real "5squareFeed" name.
+
+**Part 2 -- create the Google Cloud project + OAuth client** (one per
+environment; never reuse prod's project/client for dev):
+
+1. [console.cloud.google.com](https://console.cloud.google.com/),
+   signed in as the same account.
+2. Top-left project dropdown -> **"New Project"** -> name it e.g.
+   **"5squareFeed Dev"** -> Create, then make sure it's selected in the
+   dropdown before continuing.
+3. **Enable the API**: "APIs & Services" -> "Library" -> search
+   **"YouTube Data API v3"** -> **Enable**.
+4. **Configure the OAuth consent screen**: "APIs & Services" ->
+   "OAuth consent screen":
+   - User type: **External**
+   - App name / support email / developer email: e.g. "5squareFeed Dev"
+     / `5squarefeed@gmail.com`
+   - Scopes step: skip/save, not required here
+   - **Test users**: add your own Gmail here -- **required**, since
+     this app stays in "Testing" publishing status (unverified); Google
+     blocks sign-in for any account not explicitly listed here.
+5. **Create the OAuth client**: "APIs & Services" -> "Credentials" ->
+   **"+ Create Credentials"** -> **"OAuth client ID"**:
+   - Application type: **Desktop app**
+   - Name: e.g. "5squareFeed Dev Desktop Client"
+   - Create -> copy the **Client ID** and **Client Secret** shown.
+6. Put them in `.env`: dev as `YOUTUBE_DEV_CLIENT_ID`/
+   `YOUTUBE_DEV_CLIENT_SECRET`, prod (later) as
+   `YOUTUBE_PROD_CLIENT_ID`/`YOUTUBE_PROD_CLIENT_SECRET`.
+
+**Part 3 -- tie them together (get the refresh token)**:
+
+1. Confirm `.env` has `YOUTUBE_ENVIRONMENT=dev` and both dev fields
+   from Part 2 filled in.
+2. On your **host machine** (not inside Docker -- this needs a real
+   browser):
+   ```bash
+   pip install google-auth-oauthlib google-api-python-client google-auth
+   python -m app.scripts.youtube_oauth_setup
+   ```
+3. It opens a browser to Google's consent screen. Sign in as the
+   account from Part 1/2. You'll see an "unverified app" warning --
+   click "Advanced" -> "Go to \<app name\> (unsafe)" (expected and
+   fine, it's your own app in Testing mode).
+4. **If it asks which channel/brand account to use, pick the channel
+   from Part 1** -- this is the step that actually links the credential
+   to the right channel. If it doesn't ask (sometimes it just uses the
+   account's only/default channel), verify afterward by checking which
+   channel the first real published video actually landed on.
+5. The script prints a refresh token -- save it as
+   `YOUTUBE_DEV_REFRESH_TOKEN` (or `YOUTUBE_PROD_REFRESH_TOKEN` for
+   the prod run).
+6. **Restart is not enough** -- Docker Compose only re-reads `.env` on
+   container *creation*, not a plain restart. After editing `.env`,
+   run:
+   ```bash
+   docker compose up -d --force-recreate api worker
+   ```
+   Confirm it took: `docker compose exec api python -c "from app.config import settings; print(settings.youtube_configured)"`
+   should print `True`.
+7. **Complete YouTube's own one-off link verification, per channel**
+   -- separate from everything above, and easy to miss: a brand-new
+   channel's very first video(s) will have source links in the
+   description show up as **plain text, not clickable**, even though
+   the description YouTube received is completely correct (verified
+   directly: no truncation, clean ASCII spacing, no invisible
+   characters). This is a real YouTube-side gate, confirmed via the
+   message *"To make external links clickable, first complete a
+   one-off verification"* -- complete it once per channel (in YouTube
+   Studio; it's channel-level, not something in this repo). Confirmed
+   fixed on the dev channel: after completing it, the *same*
+   already-published video's links became real, clickable links
+   immediately, no republish needed. **Do this for the prod channel
+   too**, the first time you publish for real, or its links will look
+   broken to viewers.
+
+Until the currently-selected pair is fully set, `/publish` fails fast
+with a clear `YouTubeNotConfigured` error -- before ever touching the
+network -- rather than an opaque auth failure.
 
 ## Inspecting results
 
@@ -471,8 +575,8 @@ curl http://localhost:8000/api/v1/episodes/{episode_id}
 ## Running tests
 
 ```bash
-docker exec 5min-ai-news-api-1 pip install -r requirements-dev.txt
-docker exec -w /app 5min-ai-news-api-1 pytest
+docker exec 5squarefeed-api-1 pip install -r requirements-dev.txt
+docker exec -w /app 5squarefeed-api-1 pytest
 ```
 
 92 tests, no running Postgres required -- DB-backed tests use an

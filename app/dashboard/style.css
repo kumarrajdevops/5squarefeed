@@ -146,6 +146,11 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
   background: var(--skip-bg); color: var(--skip);
 }
 .pill.repeat-flagged { background: var(--fail-bg); color: var(--fail); }
+.pill.youtube-env-dev { background: var(--skip-bg); color: var(--skip); }
+.pill.youtube-env-prod {
+  background: var(--fail-bg); color: var(--fail);
+  font-weight: 700; border: 1px solid var(--fail);
+}
 
 /* Buttons */
 

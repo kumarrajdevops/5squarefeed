@@ -1473,6 +1473,100 @@ auto-blocking).
       kept in `app/dashboard/branding/` as reference material only --
       not the source for any generated icon.
 
+### This session — 2026-09-21, part 34 (separate dev/prod YouTube credentials + channels)
+
+- [x] User's call, after discussing the tradeoff: dev and prod get
+      **fully separate** Google Cloud OAuth clients *and* separate
+      destination YouTube channels, not just separate secrets pointed
+      at one channel. Reason (from that discussion): YouTube's API
+      quota is tracked per Cloud project, not per channel, so sharing
+      prod's credentials for dev testing risks burning the day's quota
+      on test uploads and blocking a real publish; a separate channel
+      also keeps dev's private test uploads out of the real channel's
+      video library entirely.
+- [x] `app/config.py`: `youtube_client_id`/`_client_secret`/
+      `_refresh_token` are now **computed properties**, not raw
+      fields -- they resolve to `youtube_dev_*` or `youtube_prod_*`
+      based on a new `youtube_environment` setting (`"dev"` default,
+      `"prod"` the other option). Both credential pairs can be
+      configured in `.env` simultaneously; switching modes is a
+      one-line env var change, never editing secrets back and forth.
+      `app/publishing/youtube_publisher.py` and
+      `app/tasks/publishing.py` needed **zero changes** to their own
+      logic -- they still just read `settings.youtube_client_id` etc.,
+      unaware credential resolution got smarter underneath them.
+- [x] `app/tasks/publishing.py` now logs and returns which
+      `youtube_environment` a publish actually used -- a real,
+      previously-possible mistake (publishing to the wrong channel
+      without noticing, since dev/prod look identical from inside the
+      task) now has an explicit trail.
+- [x] Dashboard: a `youtube_environment` pill next to the Publish
+      button, styled distinctly for `prod` (red/bold/bordered) vs
+      `dev` (neutral) -- a visible safety rail so a real-channel
+      publish is never accidentally clicked while believing you're
+      still in dev mode. New `_serialize_episode` field (read fresh
+      from settings at request time, not stored per-episode -- it's
+      config, not episode data).
+- [x] `app/scripts/youtube_oauth_setup.py` is now environment-aware:
+      prints which `YOUTUBE_ENVIRONMENT` it's running for, reminds the
+      user to sign in with the right channel's account during the
+      browser consent flow, and tells them the exact env var
+      (`YOUTUBE_DEV_REFRESH_TOKEN` vs `YOUTUBE_PROD_REFRESH_TOKEN`) to
+      save the resulting token under. Meant to be run twice total, once
+      per environment.
+- [x] **Verified live**: confirmed `youtube_environment` defaults to
+      `"dev"` and `youtube_client_id` correctly resolves to the
+      `youtube_dev_client_id` field; confirmed overriding
+      `YOUTUBE_ENVIRONMENT=prod` correctly switches resolution to the
+      prod fields instead; confirmed the new field appears correctly
+      in a real `GET /episodes/{id}` response. One real test failure
+      caught and fixed: `test_upload_video_fails_fast_when_not_configured`
+      tried to monkeypatch the now-read-only `youtube_client_id`
+      property directly, which pydantic correctly rejects (no setter)
+      -- fixed to monkeypatch the underlying `youtube_dev_*` fields
+      instead. Full `pytest` suite: 92 tests, all passing.
+- [x] User completed the manual setup themselves (dev Brand Account
+      channel, Cloud project, OAuth client, `youtube_oauth_setup.py`
+      run) -- `YOUTUBE_DEV_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN` all
+      landed in `.env`. Confirmed `youtube_configured` reads `True` in
+      both the `api` and `worker` containers after a
+      `--force-recreate` (a plain `docker compose restart` does not
+      re-read `.env` -- only container recreation does).
+- [x] **Real milestone, verified live, not assumed**: triggered a real
+      `/publish` on episode #9 (already `approved`/`ready` from earlier
+      testing). Result: `publish_status: "published"`,
+      `youtube_url: "https://youtu.be/bfCxIhsPw5w"`,
+      `publish_error: null`. Worker log explicitly confirms
+      `YOUTUBE_ENVIRONMENT='dev'` was used throughout, and the upload
+      (a real 9.5MB video) completed in ~9.7s. This is the **first
+      real network call this integration has ever made** -- everything
+      up to this point (the YouTubeNotConfigured fail-fast path, the
+      dashboard UI, the dev/prod credential switch) had only been
+      tested without real credentials. The Publishing Worker (part 30)
+      is now genuinely, not just structurally, complete for YouTube/dev.
+      Prod remains unconfigured until the user repeats the same manual
+      setup with a `YOUTUBE_PROD_*` pair and the real "5squareFeed"
+      channel.
+- [x] **Follow-up, resolved**: user reported the published description's
+      source links rendered as plain text, not clickable, on the real
+      watch page (not just Studio's editor). Investigated properly
+      before assuming a bug: re-derived the exact description
+      submitted at publish time from the DB and confirmed it was
+      clean (25 well-formed `https://` URLs, correct ASCII spacing
+      around each, no truncation, no invisible/non-breaking-space
+      characters); confirmed via the watch page's accessibility tree
+      that zero `&lt;a&gt;` tags existed around the URL text (not just a
+      styling issue). Root cause: a real, one-off YouTube channel
+      verification gate ("To make external links clickable, first
+      complete a one-off verification") -- unrelated to our data,
+      confirmed by the user completing it in YouTube Studio, after
+      which the same video's links immediately became real, clickable
+      `<a href="https://www.youtube.com/redirect?...">` links (checked
+      the accessibility tree again to confirm, not just visually).
+      **The prod channel will need this same one-off verification
+      completed too** before its first real publish's links will be
+      clickable -- add it to the prod setup checklist.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
