@@ -321,6 +321,12 @@ cached video playback, an edit-clobbering bug -- see `TODO.md`) were
 only caught through actual live use once that browser connection
 dropped mid-session, not through automated verification alone.
 
+Carries the real 5squareFeed brand: favicon, apple-touch-icon, and a
+`site.webmanifest` (generated from the real logo -- see
+`app/dashboard/branding/` for the source assets and every generated
+size) so it's installable as a home-screen "app" with the actual icon,
+not a generic browser tab.
+
 **What you can do from it:**
 
 - **Browse episodes** -- list view links into each episode's Studio view.

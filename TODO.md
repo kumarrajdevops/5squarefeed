@@ -1420,6 +1420,59 @@ auto-blocking).
       delete once the new `5squarefeed` project has been live a while
       with no issues -- not done automatically, ask before removing.
 
+### This session — 2026-09-21, part 33 (real logo -> favicon/app-icon set)
+
+- [x] User's designer-provided logo assets (light/dark/gradient "5²"
+      icon variants + a full brand sheet) were only shared as generic
+      renders before -- extracted a clean, tightly-cropped 562x562
+      master from the highest-quality standalone render (light icon on
+      white), plus lower-res dark/gradient variants cropped from the
+      full brand sheet, since only the light icon had a dedicated
+      high-quality standalone image. All three plus the original,
+      unmodified source files kept in `app/dashboard/branding/` as the
+      brand asset source of truth for future use.
+- [x] Generated a full favicon/PWA icon set from the light-icon master
+      (`app/dashboard/`): `favicon.ico` (multi-res 16/32/48),
+      `favicon-16x16.png`/`favicon-32x32.png`/`favicon-48x48.png`,
+      `apple-touch-icon.png` (180x180, iOS home screen), Android/PWA
+      `android-chrome-192x192.png`/`android-chrome-512x512.png`, and a
+      `maskable-icon-512.png` (content scaled to ~72% of canvas so an
+      Android adaptive-icon circular mask can't clip the logo). Added
+      `site.webmanifest` (name/icons/theme_color -- theme_color
+      `#0c101c` and background_color `#f5f7fb` pulled directly from
+      `style.css`'s own `--bg` tokens, not invented) so the dashboard
+      is installable as a home-screen "app" with the real icon, not
+      just a bookmarked tab.
+- [x] Wired all of it into `app/dashboard/index.html`'s `<head>` --
+      favicon links (ico + 3 png sizes), apple-touch-icon,
+      manifest link, theme-color meta tag.
+- [x] **Verified live**: every new file returns `200` from the running
+      dashboard (`favicon.ico` through `site.webmanifest`), the
+      manifest JSON is well-formed and correct, and the generated
+      icons were visually inspected at actual output sizes (48px,
+      512px, and the maskable variant) -- the "5²" mark stays
+      legible even at favicon size.
+- [x] **Real mistake caught by the user asking to cross-check, fixed**:
+      the light-icon master above was built from a separate standalone
+      JPEG render, not from this brand sheet's own labeled "LIGHT ICON"
+      reference -- never directly compared the two before using it.
+      They turned out to be two different icon treatments: the JPEG
+      had an extra inset double-bezel/ring style with more internal
+      padding; the brand sheet's actual "LIGHT ICON" (the canonical,
+      labeled reference) is a plain single rounded-square card, glyph
+      filling more of it. Confirmed by cropping the sheet's own
+      LIGHT/DARK/GRADIENT thumbnails directly and comparing side by
+      side against what had been generated. Rebuilt the light-icon
+      master from a tight crop of the sheet's own reference card
+      instead (native 308x308, smaller than the JPEG's 562x562 -- a
+      real, accepted resolution tradeoff for correctness), and
+      re-cropped dark/gradient masters slightly tighter at the same
+      time. Regenerated and re-verified the entire favicon/PWA set
+      live from the corrected masters. The standalone JPEGs
+      (`icon-light-original.jpg`, `logo-vertical-original.jpg`) are
+      kept in `app/dashboard/branding/` as reference material only --
+      not the source for any generated icon.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
