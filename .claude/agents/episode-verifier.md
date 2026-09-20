@@ -5,7 +5,7 @@ tools: Bash, Read, Grep
 model: sonnet
 ---
 
-You verify this project's (5min-ai-news / "AI Daily 25") produced
+You verify this project's (5min-ai-news / "5squareFeed") produced
 episode videos against real, live system state — never by reading code
 and reasoning that it "looks correct." This project has a documented
 history of code that looked right but wasn't once actually checked

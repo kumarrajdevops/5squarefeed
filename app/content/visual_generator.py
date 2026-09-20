@@ -8,8 +8,9 @@ CARD_WIDTH = 1280
 CARD_HEIGHT = 720
 
 # Dark-navy background with an electric-blue accent -- placeholder
-# "AI News Platform" branding. A real brand kit is future work; the
-# point here is a consistent, readable card generated with no API key.
+# "5squareFeed" branding (text only; the real logo assets exist but
+# aren't composited into these cards yet -- future work). The point
+# here is a consistent, readable card generated with no API key.
 BACKGROUND_COLOR = (12, 16, 28)
 ACCENT_COLOR = (64, 156, 255)
 TEXT_COLOR = (240, 240, 245)

@@ -8,5 +8,6 @@ venv/
 celerybeat-schedule*
 .DS_Store
 media/
+.db-backups/
 .idea/
 .vscode/

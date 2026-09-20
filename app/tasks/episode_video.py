@@ -211,9 +211,9 @@ def produce_episode_video(episode_id: int) -> dict:
         formatted_date = episode.run_date.strftime("%B %d, %Y")
 
         intro_path = _produce_branding_clip(
-            main_text="AI Daily 25",
-            sub_text=f"{formatted_date} — Today's Top 25 AI Stories",
-            narration_text=f"AI Daily 25 for {formatted_date}. Today's top 25 AI stories.",
+            main_text="5squareFeed",
+            sub_text=f"{formatted_date} — 25 Stories A Day",
+            narration_text=f"5squareFeed for {formatted_date}. Today's top 25 AI stories.",
             clip_id=f"episode_{episode_id}_intro",
         )
         if intro_path:
@@ -244,9 +244,9 @@ def produce_episode_video(episode_id: int) -> dict:
             added_first_story_clip = True
 
         outro_path = _produce_branding_clip(
-            main_text="That's all for today's AI Daily 25.",
+            main_text="That's all for today's 5squareFeed.",
             sub_text="See you tomorrow.",
-            narration_text="That's all for today's AI Daily 25. See you tomorrow.",
+            narration_text="That's all for today's 5squareFeed. See you tomorrow.",
             clip_id=f"episode_{episode_id}_outro",
         )
         if outro_path:

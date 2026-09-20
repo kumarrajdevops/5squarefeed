@@ -49,7 +49,7 @@ class RevalidateStaticFiles(StaticFiles):
 
 
 app = FastAPI(
-    title="AI News Platform",
+    title="5squareFeed",
     version="0.1.0",
     description="Local-first AI technology news pipeline.",
 )

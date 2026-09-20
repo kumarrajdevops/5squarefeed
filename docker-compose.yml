@@ -1,12 +1,17 @@
-name: 5min-ai-news
+name: 5squarefeed
 # Pinned explicitly so the named volume below always resolves to
-# "5min-ai-news_postgres_data" regardless of what the containing
-# folder is called. Without this, Docker Compose derives the project
-# name from the parent folder name -- renaming the folder would make
+# "5squarefeed_postgres_data" regardless of what the containing folder
+# is called. Without this, Docker Compose derives the project name
+# from the parent folder name -- renaming the folder would make
 # Compose look for a differently-prefixed volume, find none, and
 # silently create a fresh empty one (data loss, not an error).
-# Note: the production/public brand name is "AI News Platform" --
-# see README.md. This is just the dev/repo-level project name.
+# Renamed from "5min-ai-news" -> "5squarefeed" once the real brand/
+# domain existed (see CLAUDE.md) -- migrated via a full pg_dump/
+# pg_restore, not a raw volume rename, so nothing was lost; the old
+# "5min-ai-news_postgres_data" volume and a .db-backups/ dump file are
+# both kept as a safety net until the new one's been live a while.
+# Note: the production/public brand name is "5squareFeed" -- see
+# README.md. This is just the dev/repo-level project name.
 
 services:
   postgres:

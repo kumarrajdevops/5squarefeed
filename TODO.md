@@ -1,4 +1,4 @@
-# TODO — AI News Platform (5min-ai-news)
+# TODO — 5squareFeed (5min-ai-news)
 
 Tracks implementation progress against the architecture in
 [`project.md`](project.md). Update this file as work completes or
@@ -1342,6 +1342,83 @@ auto-blocking).
       that predate this change -- they participate in the historical
       corpus via the `raw_summary`/title fallback until naturally
       refreshed. Deferred, not blocking.
+
+### This session — 2026-09-21, part 32 (real brand identity: 5squareFeed)
+
+- [x] User bought the domain `5squarefeed.in`, created
+      `5squarefeed@gmail.com`, and commissioned a real logo/icon set
+      under the name **5squareFeed** (tagline "25 Stories A Day",
+      "Today's AI. A brighter tomorrow.") -- replacing the placeholder
+      "AI News Platform"/"AI Daily 25" names used everywhere before a
+      real brand existed.
+- [x] Full text rebrand across every user-facing surface: dashboard
+      title/wordmark (`app/dashboard/index.html`), FastAPI app title
+      (`app/main.py`), video intro/outro branding cards + narration
+      (`app/tasks/episode_video.py`), YouTube video title/description/
+      tags (`app/publishing/youtube_publisher.py`'s `BRAND_NAME`),
+      `README.md`, `CLAUDE.md`'s project-identity section, the
+      `episode-verifier` agent, and the corresponding test assertions
+      (`tests/test_youtube_publisher.py`). Deliberately did NOT rewrite
+      historical dated `TODO.md` entries (they describe what was true
+      at the time) -- only the doc's living title header.
+      `app/content/visual_generator.py`'s branding-card generator still
+      only draws text, not the real logo image assets -- noted as
+      future work, not done here (a separate, larger image-compositing
+      task, not asked for).
+- [x] **GitHub repo rename to `5squarefeed`**: `gh` CLI isn't installed
+      on this machine, so this was done manually by the user via
+      GitHub's web UI rather than `gh repo rename` -- local `origin`
+      remote URL updated to match afterward.
+- [x] **Docker Compose project rename, `5min-ai-news` -> `5squarefeed`**
+      (the one place CLAUDE.md explicitly warns this is dangerous --
+      a naive rename would silently point at a fresh empty Postgres
+      volume). Done via a full backup/migrate/verify sequence, not a
+      raw rename, per the user's explicit instruction:
+      1. `pg_dump -F c` (custom format, schema+data+sequences) from the
+         live `5min-ai-news-postgres-1` container, copied to
+         `.db-backups/5min-ai-news-backup.dump` on the host (now
+         gitignored).
+      2. `docker compose down` (volumes preserved by default, not
+         `-v`), confirmed the old `5min-ai-news_postgres_data` volume
+         was still intact via `docker volume ls`.
+      3. Changed `docker-compose.yml`'s `name:` to `5squarefeed`,
+         brought up only `postgres` -- confirmed a genuinely fresh,
+         separate `5squarefeed_postgres_data` volume was created (old
+         one untouched).
+      4. `pg_restore --no-owner --no-privileges` the dump into the new,
+         empty database -- succeeded cleanly (schema, data, sequences,
+         indexes, FKs, `alembic_version` all restored in one pass).
+      5. **Verified byte-for-byte via independent row counts**: spun up
+         the OLD volume in an isolated, throwaway `postgres:16`
+         container (mounted read-only via the same volume, never
+         touching the live stack) purely to compare counts against the
+         new database -- `stories` (153), `episodes` (13),
+         `episode_stories` (223), `story_content` (77) matched exactly
+         on both sides. Not just "looks right" -- an actual independent
+         cross-check, per this project's verification-before-declaring-
+         done standard.
+      6. Brought the full stack up under the new project name,
+         confirmed the API/worker/dashboard all work correctly against
+         the migrated data (13 episodes returned correctly, all 14
+         Celery tasks registered, dashboard title/wordmark render
+         "5squareFeed"). Full `pytest` suite: 92 tests, still all
+         passing.
+      7. Both the old volume (`5min-ai-news_postgres_data`, currently
+         orphaned but not deleted) and the `.db-backups/` dump file are
+         being kept as a safety net for now -- deleting either is a
+         real, irreversible action not taken without the user asking
+         for it explicitly.
+- [x] Local project folder deliberately left unrenamed (user's explicit
+      choice) -- this session is rooted in
+      `D:\developer\projects\5min-ai-news` and renaming it mid-session
+      would have risked breaking file access for the rest of the
+      session. `5min-ai-news` remains both the local folder name and
+      the internal dev/repo-level identifier -- see the updated
+      `CLAUDE.md` project-identity section for the final naming split.
+- [ ] The old, now-orphaned `5min-ai-news_postgres_data` Docker volume
+      and the `.db-backups/5min-ai-news-backup.dump` file are safe to
+      delete once the new `5squarefeed` project has been live a while
+      with no issues -- not done automatically, ask before removing.
 
 ## Known issues / follow-ups
 

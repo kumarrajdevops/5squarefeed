@@ -8,9 +8,20 @@ or dashboard changes. Detailed session-by-session history is in
 
 ## Project identity
 
-- `5min-ai-news` = repo/dev name (Docker Compose project name, container
-  prefixes). "AI News Platform" / "AI Daily 25" = production/public brand.
-  Don't rename one to match the other.
+- **"5squareFeed"** is the production/public brand (domain
+  `5squarefeed.in`, Gmail `5squarefeed@gmail.com`, GitHub repo
+  `5squarefeed`) -- replaces the older "AI News Platform"/"AI Daily 25"
+  names used before this brand existed. Use "5squareFeed" (exact
+  capitalization) in any user-facing text: dashboard, video branding
+  cards, YouTube titles/descriptions, README.
+- `5min-ai-news` remains the internal dev/repo-level identifier for
+  anything infra-plumbing-only (Docker Compose project name, container
+  prefixes, local folder name) -- deliberately kept separate from the
+  stylized brand name above so a technical identifier never needs exact
+  capitalization/spacing to match. Don't casually rename one to match
+  the other -- see TODO.md for the one deliberate, careful exception
+  (a planned Compose-project-name migration with a full data backup/
+  restore either side of it).
 - Stack: FastAPI + PostgreSQL (Alembic) + Redis + Celery, via Docker
   Compose. Dashboard at `http://localhost:8000/dashboard/`.
 

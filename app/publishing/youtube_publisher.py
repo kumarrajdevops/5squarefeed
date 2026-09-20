@@ -4,7 +4,7 @@ from pathlib import Path
 from app.config import settings
 
 
-BRAND_NAME = "AI Daily 25"
+BRAND_NAME = "5squareFeed"
 
 # YouTube's real limits: title <= 100 chars, description <= 5000 chars.
 # MAX_DESCRIPTION_CHARS leaves headroom rather than hard-coding exactly
@@ -54,7 +54,7 @@ def build_video_metadata(run_date: date, stories: list[dict]) -> dict:
     if len(description) > MAX_DESCRIPTION_CHARS:
         description = description[: MAX_DESCRIPTION_CHARS - 3].rstrip() + "..."
 
-    tags = ["AI News", "Artificial Intelligence", BRAND_NAME, "Tech News", "AI Daily"]
+    tags = ["AI News", "Artificial Intelligence", BRAND_NAME, "Tech News", "Daily AI News"]
 
     return {"title": title, "description": description, "tags": tags}
 

@@ -19,7 +19,7 @@ def test_build_video_metadata_title_and_description():
 
     metadata = build_video_metadata(date(2026, 9, 19), stories)
 
-    assert "AI Daily 25" in metadata["title"]
+    assert "5squareFeed" in metadata["title"]
     assert "September 19, 2026" in metadata["title"]
     assert "3" in metadata["title"]
 
@@ -27,7 +27,7 @@ def test_build_video_metadata_title_and_description():
         assert f"Story {i}" in metadata["description"]
     assert "TechCrunch AI" in metadata["description"]
     assert "https://example.com/a" in metadata["description"]
-    assert "AI Daily 25" in metadata["tags"]
+    assert "5squareFeed" in metadata["tags"]
 
 
 def test_build_video_metadata_truncates_long_description():
