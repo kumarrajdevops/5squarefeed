@@ -86,6 +86,19 @@ function renderEditMetaHtml(story) {
     `;
   }
 
+  // Soft signal only (see app/tasks/ranking.py's eligibility comment)
+  // -- content-similarity flagged this story as a possible repeat of
+  // an already-narrated past story, but it was still selectable. Only
+  // shown when actually flagged.
+  if (story.repeats_story_id) {
+    html += `
+      <div class="edit-meta-row">
+        <dt>Possible repeat</dt>
+        <dd>Story #${story.repeats_story_id} -- ${escapeHtml(story.repeat_reason || "")}</dd>
+      </div>
+    `;
+  }
+
   const facts = story.extracted_facts;
   if (facts && (facts.companies.length || facts.products.length || facts.events.length || facts.dates.length || facts.claims.length)) {
     const parts = [];
@@ -428,6 +441,9 @@ function renderStoryList(listId, stories, ep, jumpable) {
       <div class="story-pills">
         <span class="pill ${s.content_status || "pending"}">${s.content_status || "no content"}</span>
         <span class="pill ${s.verification_status}" title="${escapeAttr(s.verification_reason || "")}">${s.verification_status}</span>
+        ${s.repeats_story_id
+          ? `<span class="pill repeat-flagged" title="${escapeAttr(s.repeat_reason || "")}">possible repeat</span>`
+          : ""}
       </div>
     </li>
   `).join("");

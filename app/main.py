@@ -580,6 +580,13 @@ def _serialize_episode(db, episode: Episode) -> dict:
             "verification_status": story.verification_status,
             "verification_reason": story.verification_reason,
             "extracted_facts": json.loads(story.extracted_facts) if story.extracted_facts else None,
+            # Soft signal only (see app/tasks/ranking.py's eligibility
+            # comment) -- non-null means content-based similarity
+            # flagged this story as likely repeating an already-
+            # narrated past story, but it was still selectable; the
+            # editor decides whether to swap it out.
+            "repeats_story_id": story.repeats_story_id,
+            "repeat_reason": story.repeat_reason,
             # Needed by the dashboard's "click a story, jump the
             # player" feature (sums preceding durations) and its edit
             # panel -- None until that story's content pipeline runs.

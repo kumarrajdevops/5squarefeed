@@ -65,7 +65,22 @@ def run_ranking_selection(run_date_iso: str | None = None) -> dict:
 
         # -------------------------------------------------
         # Eligible pool: canonical (non-duplicate), AI-candidate
-        # stories. Not-AI and duplicate rows never reach ranking.
+        # stories. repeats_story_id (see app/tasks/content_dedup.py --
+        # a content-similarity complement to the already_primary_
+        # story_ids identity check above, catching a *different*
+        # story covering an already-narrated event) is deliberately
+        # NOT a hard exclusion here: live verification found real
+        # false-positive risk at the current, still-unvalidated
+        # similarity threshold (two topically-related-but-distinct
+        # opinion pieces scored above threshold). A false positive on
+        # a hard exclusion silently and permanently drops a
+        # legitimately distinct story -- too asymmetric a risk before
+        # the threshold has real tuning data behind it. Soft signal
+        # only for now, same as verification_status/Automated QA:
+        # surfaced in the dashboard (see rank_reason/repeat_reason
+        # below and _serialize_episode in app/main.py), human decides.
+        # Revisit hard-excluding once CONTENT_SIMILARITY_THRESHOLD is
+        # validated against real data (see TODO.md).
         # -------------------------------------------------
 
         eligible_query = db.query(Story).filter(
@@ -79,6 +94,10 @@ def run_ranking_selection(run_date_iso: str | None = None) -> dict:
             )
 
         stories = eligible_query.all()
+
+        content_repeats_flagged = sum(
+            1 for story in stories if story.repeats_story_id is not None
+        )
 
         # -------------------------------------------------
         # Duplicate counts per canonical story, computed in one
@@ -152,6 +171,7 @@ def run_ranking_selection(run_date_iso: str | None = None) -> dict:
             "run_date": run_date.isoformat(),
             "eligible_stories": len(scored),
             "already_used_excluded": len(already_primary_story_ids),
+            "content_repeats_flagged": content_repeats_flagged,
             "primary_selected": min(len(top_slots), PRIMARY_SLOTS),
             "backup_selected": max(0, len(top_slots) - PRIMARY_SLOTS),
         }

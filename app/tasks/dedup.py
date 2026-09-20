@@ -1,7 +1,7 @@
 from app.db import SessionLocal
 from app.filters.dedup import find_duplicate_match
 from app.models import Story
-from app.tasks.verification import run_fact_extraction_and_verification
+from app.tasks.content_dedup import enrich_and_dedup_by_content
 from app.worker.celery_app import celery_app
 
 
@@ -88,11 +88,14 @@ def deduplicate_new_stories() -> dict:
 
     print(f"[dedup] Completed: {result}")
 
-    # Fact Extraction + Verification run on every ingestion cycle, same
-    # as dedup itself -- this is the one place both ingest_news and
-    # ingest_hackernews_stories already funnel through.
-    verification_task = run_fact_extraction_and_verification.delay()
-    print(f"[dedup] Queued verification task {verification_task.id}")
-    result["verification_task_id"] = verification_task.id
+    # Content-based dedup + historical repeat detection (full article
+    # text + TF-IDF similarity) run next, same as Fact Extraction +
+    # Verification used to run directly from here -- this is the one
+    # place both ingest_news and ingest_hackernews_stories already
+    # funnel through. That stage chains into verification itself once
+    # it's done (see app/tasks/content_dedup.py).
+    content_dedup_task = enrich_and_dedup_by_content.delay()
+    print(f"[dedup] Queued content-dedup task {content_dedup_task.id}")
+    result["content_dedup_task_id"] = content_dedup_task.id
 
     return result

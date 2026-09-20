@@ -33,7 +33,20 @@ class Story(Base):
     author: Mapped[str | None] = mapped_column(String(255))
     external_id: Mapped[str | None] = mapped_column(String(500))
     raw_summary: Mapped[str | None] = mapped_column(Text)
+
+    # Full extracted article body (see app/content/article_extractor.py
+    # + app/tasks/content_dedup.py) -- NULL until a fetch is attempted
+    # (see content_fetch_status below), and stays NULL if extraction
+    # fails; comparisons fall back to raw_summary/title in that case.
     raw_content: Mapped[str | None] = mapped_column(Text)
+
+    # SHA-256 hex digest of normalized raw_content -- a cheap exact-copy
+    # fast path (e.g. syndicated wire content) before ever running the
+    # more expensive TF-IDF similarity comparison. Only set on a
+    # successful fetch (see content_fetch_status, which is the actual
+    # "was a fetch already attempted" idempotency flag -- content_hash
+    # alone can't serve that role since a failed fetch has no content
+    # to hash).
     content_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(50),
@@ -75,6 +88,45 @@ class Story(Base):
     # as filter_reason on the AI relevance filter.
     dedup_reason: Mapped[str | None] = mapped_column(
         Text,
+        nullable=True,
+    )
+
+    # -----------------------------------------------------------
+    # Historical repeat detection (see app/tasks/content_dedup.py) --
+    # a different question from canonical_story_id above.
+    # canonical_story_id groups same-batch duplicates (two stories
+    # ingested around the same time about the same event);
+    # repeats_story_id flags that THIS story covers the same event as
+    # something already narrated as primary in a PAST episode, even
+    # under a different headline/outlet/URL -- content-similarity
+    # based, not identity based (see the "never re-select" identity
+    # check in app/tasks/ranking.py, which this complements). Soft
+    # signal only, same as verification_status below -- does NOT
+    # exclude from ranking eligibility (real false-positive risk found
+    # during live verification at the current, still-unvalidated
+    # similarity threshold; see TODO.md). Surfaced in the dashboard so
+    # a human can decide.
+    # -----------------------------------------------------------
+    repeats_story_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stories.id"),
+        nullable=True,
+        index=True,
+    )
+
+    repeat_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # Observability for the (genuinely fragile) full-article-text
+    # fetch that powers content-based dedup/repeat-detection above.
+    # NULL = never attempted. "success" | "empty_extraction" |
+    # "fetch_error" | "non_html". A blocked/paywalled/JS-rendered site
+    # degrades to a status here, never fought (no headless browser, no
+    # CAPTCHA-solving) -- same standing rule as app/sources/
+    # article_fetcher.py.
+    content_fetch_status: Mapped[str | None] = mapped_column(
+        String(20),
         nullable=True,
     )
 

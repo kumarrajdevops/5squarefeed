@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.tasks.ingestion",
         "app.tasks.ingestion_hackernews",
         "app.tasks.dedup",
+        "app.tasks.content_dedup",
         "app.tasks.verification",
         "app.tasks.ranking",
         "app.tasks.content",

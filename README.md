@@ -20,7 +20,7 @@ explainable, nothing that can hallucinate or vary run to run:
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
 | AI-relevance filter | Regex keyword matching against a fixed word list | No |
-| Deduplication | Title string-similarity + time window | No |
+| Deduplication | Title string-similarity + time window, plus full-article-text TF-IDF/cosine similarity (same-batch and against past narrated stories) | No |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
 | Verification (soft signal) | Cross-source count + source credibility threshold | No |
 | Ranking | A fixed scoring formula (recency, source credibility, momentum, verification) | No |
@@ -56,7 +56,27 @@ whether an article is about AI), never a call to an AI API.
   real publisher for link-posts (e.g. "The Guardian") instead of
   attributing everything to "Hacker News", so credibility scoring
   reflects the actual outlet
-- Deterministic duplicate-story detection (title similarity + time window)
+- Deterministic duplicate-story detection, two layers:
+  1. Title similarity + time window (fast, in-memory, same-batch only).
+  2. Full-article-text similarity (`app/content/article_extractor.py`
+     fetches the linked article's real body via `trafilatura`;
+     `app/filters/content_similarity.py` scores it with TF-IDF +
+     cosine similarity, `scikit-learn` -- classic deterministic
+     information retrieval, not an LLM) against **both** today's batch
+     (catches cross-outlet duplicates under a completely different
+     headline that title-matching alone misses -- same hard exclusion
+     as #1, just a stronger signal) **and** the full historical corpus
+     of every story ever narrated as primary (catches a *different*
+     story repeating an event already told to the public, which the
+     identity-based "never re-select" check above can't catch on its
+     own -- **soft signal only**, surfaced in the dashboard as a
+     "possible repeat" pill rather than a hard exclusion, after live
+     testing found real false-positive risk at the current,
+     unvalidated similarity threshold; see `TODO.md`). A blocked/
+     paywalled/JS-rendered fetch degrades gracefully
+     (`content_fetch_status`) and falls back to the short summary --
+     never fought, no headless browser, no CAPTCHA-solving, same
+     standing rule as the VentureBeat RSS source.
 - Fact Extraction (companies, products, event categories, dates,
   numeric claims -- `app/extraction/fact_extractor.py`) and a
   Verification Engine (`app/verification/engine.py`: verified if
@@ -448,7 +468,7 @@ docker exec 5min-ai-news-api-1 pip install -r requirements-dev.txt
 docker exec -w /app 5min-ai-news-api-1 pytest
 ```
 
-85 tests, no running Postgres required -- DB-backed tests use an
+92 tests, no running Postgres required -- DB-backed tests use an
 in-memory SQLite database (`tests/conftest.py`'s `db_session` fixture;
 every model uses portable column types, so this is a faithful stand-in)
 rather than the real dev database. Covers the deterministic filters

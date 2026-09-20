@@ -145,6 +145,7 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
 .pill.skip, .pill.pending, .pill.draft, .pill.producing, .pill.script_ready, .pill.voice_ready, .pill.visual_ready, .pill.unverified, .pill.not_published, .pill.publishing {
   background: var(--skip-bg); color: var(--skip);
 }
+.pill.repeat-flagged { background: var(--fail-bg); color: var(--fail); }
 
 /* Buttons */
 

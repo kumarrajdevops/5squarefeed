@@ -1235,6 +1235,114 @@ auto-blocking).
       publish status are all deliberately out of scope for this first
       pass -- see "Next up" below.
 
+### This session — 2026-09-20, part 31 (full-text content similarity: stronger dedup + historical repeat detection)
+
+- [x] **User's two goals, verbatim**: (1) don't publish near-duplicate
+      stories under different headlines but the same underlying story/
+      context -- today's dedup was title-only (`difflib`/Jaccard, 48h
+      window), which the module's own comment already admitted misses
+      heavily-paraphrased cross-outlet coverage; (2) don't repeat, to
+      the public, a story covering the same event as something already
+      narrated in a past episode -- the existing "never re-select"
+      check (part 26) is identity-based (same story row only), not
+      content-based, so a *different* story about an already-narrated
+      event was never caught.
+- [x] **Explicit design choices** (after discussing tradeoffs, incl.
+      the project's two prior scraping rejections -- Anthropic/Meta AI
+      blogs, GitHub Trending, both about using scraping as a
+      *discovery* mechanism via fragile unofficial mirrors, a different
+      problem from fetching the body of a URL a story already has via
+      an existing official source): full article-body extraction
+      (`trafilatura`, new dependency) over a lighter excerpt, and
+      TF-IDF + cosine similarity (`scikit-learn`, new dependency) over
+      fact-overlap-only. Both scopes checked: same-day batch AND the
+      full historical corpus of past primary stories. No new ingestion
+      sources; no bot-detection evasion (a blocked/paywalled fetch
+      degrades to a `content_fetch_status`, never fought).
+- [x] New `app/content/article_extractor.py` (full-text fetch,
+      mirrors `app/sources/article_fetcher.py`'s defensive contract),
+      `app/filters/content_similarity.py` (pure TF-IDF/cosine
+      functions), `app/tasks/content_dedup.py`
+      (`enrich_and_dedup_by_content`, new pipeline stage between
+      title-dedup and verification). Reused the two previously-dead
+      `Story.raw_content`/`content_hash` columns; added
+      `repeats_story_id`/`repeat_reason`/`content_fetch_status`
+      (migration `b6d3f8c1a927`). `app/tasks/ranking.py`'s eligibility
+      filter extended with `repeats_story_id.is_(None)`, complementing
+      (not replacing) the existing identity-based exclusion.
+- [x] **Real bug caught live, not by code review**: the first live run
+      flagged 85 stories as "repeating" a past primary story -- but
+      closer inspection showed most were a story flagged as repeating
+      **itself**, at `content_tfidf_cosine=1.00`. Root cause: the
+      candidate query didn't exclude stories that are themselves
+      already past primaries, so they ended up being compared against
+      a historical corpus that included their own row. Fixed by
+      computing `historical_story_ids` once, up front, and excluding
+      it from the candidate pool entirely (not just from the
+      historical-repeat pass) -- exactly the kind of thing this
+      project's "verify against the live system" rule exists to catch;
+      re-ran clean after the fix (2 genuine historical repeats found,
+      zero self-matches).
+- [x] **Verified against the live stack**: `docker compose build`
+      succeeded with no extra system packages needed for `lxml`/
+      trafilatura on `python:3.12-slim`. Ran the real content-dedup
+      task against 115 real never-fetched stories: 100 fetch
+      successes, 15 graceful fallbacks (non-HTML/empty-extraction/
+      fetch-error), 12 same-batch content duplicates found, 2 genuine
+      historical repeats found (after the self-match bug fix). A known
+      already-blocked site (VentureBeat's Vercel challenge, part 23)
+      confirmed to degrade to `content_fetch_status="fetch_error"`
+      with no crash and no evasion attempt. `POST /episodes/select`
+      confirmed end-to-end: `content_repeats_excluded` (new
+      observability count added to the result dict, matching this
+      project's habit) matched exactly. Full `pytest` suite: 92 tests
+      (7 new), all passing.
+- [x] **Found a genuine, unambiguous true positive** validating the
+      whole feature's premise: story #53 "Your AI agents can now
+      control your Google Home devices" and story #65 "Google will now
+      let any AI agent run your smart home" -- same story, completely
+      different headline, `content_tfidf_cosine=0.77`. Title-only
+      dedup would never have caught this pair.
+- [x] **Real, measured evidence the `CONTENT_SIMILARITY_THRESHOLD =
+      0.35` starting guess is likely too loose for a HARD exclusion**
+      (manually reviewed every match from the live run: several
+      borderline 0.35-0.41 matches, and even one mid-range 0.54 match,
+      looked like two distinct, topically-adjacent opinion/analysis
+      pieces sharing AI-safety vocabulary rather than the same
+      underlying news event -- e.g. "Is the AI safety debate about
+      safety or control?" vs. "A brief history of AI executives
+      calling for regulation" at 0.35. The strong matches -- 0.54+
+      cases that were genuine dupes, 0.77, 1.00 -- all looked correct).
+      **Surfaced to the user rather than silently picking a new
+      number; decision: make `repeats_story_id` a soft signal**, same
+      as `verification_status`/Automated QA -- `app/tasks/ranking.py`'s
+      eligibility query no longer filters on it at all (a flagged
+      story is still fully selectable); instead
+      `repeats_story_id`/`repeat_reason` are surfaced in the dashboard
+      (`_serialize_episode` in `app/main.py`, a "possible repeat" pill
+      + edit-panel row in `app/dashboard/app.js`, matching the
+      verification pill's exact styling/pattern) so the editor decides.
+      `run_ranking_selection`'s result dict reports
+      `content_repeats_flagged` (informational count, not an exclusion
+      count) for observability. **Verified live**: re-ran selection
+      after this change -- both previously-flagged stories were
+      correctly included in the eligible pool and one was actually
+      selected as primary, confirming the signal is genuinely
+      non-blocking. Revisit hard-excluding once a proper multi-week
+      score-logging/tuning pass (still planned) provides real data.
+- [ ] No stemming/lemmatization in the TF-IDF vectorizer -- confirmed
+      live that this measurably hurts recall for genuinely independent
+      paraphrases (a synthetic "two journalists write from scratch"
+      test pair scored only 0.14; the original test fixture had to be
+      changed to a more realistic "lightly-edited/syndicated coverage"
+      pair, which scores reliably). Documented as a known limitation in
+      `app/filters/content_similarity.py`, same honest-caveat style as
+      `app/filters/dedup.py`'s own paraphrase-limitation comment.
+- [ ] `raw_content` is not backfilled for historical primary stories
+      that predate this change -- they participate in the historical
+      corpus via the `raw_summary`/title fallback until naturally
+      refreshed. Deferred, not blocking.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
