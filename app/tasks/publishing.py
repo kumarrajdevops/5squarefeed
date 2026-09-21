@@ -4,6 +4,7 @@ from pathlib import Path
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, Story
+from app.notifications.notifier import EPISODE_PUBLISH_FAILED, notify
 from app.publishing.youtube_publisher import build_video_metadata, upload_video
 from app.worker.celery_app import celery_app
 
@@ -72,6 +73,10 @@ def publish_episode_to_youtube(episode_id: int) -> dict:
         except Exception as exc:
             episode.publish_status = "failed"
             episode.publish_error = str(exc)
+            notify(
+                db, EPISODE_PUBLISH_FAILED, episode_id,
+                f"Publish failed (environment={environment}): {exc}",
+            )
             db.commit()
             print(f"[publishing] Episode {episode_id} publish failed: {exc}")
             return {

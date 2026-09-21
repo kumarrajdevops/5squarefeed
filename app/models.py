@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -376,3 +377,49 @@ class StoryContent(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=True,
     )
+
+
+class Notification(Base):
+    """
+    Failure-alert record (see app/notifications/notifier.py). Scope is
+    deliberately narrow -- only the two failure classes that mean "the
+    whole day's episode didn't happen" (video production totally
+    failing, YouTube publish failing), not every tolerated/expected
+    failure elsewhere in the pipeline (a single story's content
+    generation failing is already handled gracefully by design; QA's
+    duration_target failing is a known, documented limitation, not a
+    real problem) -- notifying on those would just be noise.
+
+    Delivered via a Slack Incoming Webhook when SLACK_WEBHOOK_URL is
+    configured (app/notifications/notifier.py) -- always recorded here
+    regardless of whether delivery succeeded, so this table stays the
+    audit trail even if Slack itself is down or unconfigured.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # "episode_video_failed" | "episode_publish_failed" -- a fixed,
+    # small set of categories, not free text, so callers can filter/
+    # group reliably later.
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    episode_id: Mapped[int | None] = mapped_column(
+        ForeignKey("episodes.id"),
+        nullable=True,
+        index=True,
+    )
+
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Whether the Slack post actually succeeded -- False both when no
+    # webhook is configured at all and when the post itself failed;
+    # this table remains the source of truth either way.
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

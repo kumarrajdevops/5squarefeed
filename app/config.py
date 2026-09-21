@@ -66,6 +66,13 @@ class Settings(BaseSettings):
             and self.youtube_refresh_token
         )
 
+    # Slack Incoming Webhook for the Notification Worker (see
+    # app/notifications/notifier.py). None until a real webhook exists
+    # -- notify() still records every failure in the notifications
+    # table either way, this only controls whether it's also posted to
+    # Slack in real time.
+    slack_webhook_url: str | None = None
+
     # Build the PostgreSQL SQLAlchemy URL.
     # The project uses psycopg (PostgreSQL driver version 3).
     @property

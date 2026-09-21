@@ -14,6 +14,7 @@ from app.content.visual_generator import generate_branding_card, generate_card
 from app.content.voice_generator import synthesize_voice
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, Story, StoryContent
+from app.notifications.notifier import EPISODE_VIDEO_FAILED, notify
 from app.tasks.content import MEDIA_ROOT, get_or_create_content, mark_content_failed
 from app.worker.celery_app import celery_app
 
@@ -200,6 +201,7 @@ def produce_episode_video(episode_id: int) -> dict:
 
         if not rows:
             episode.video_status = "failed"
+            notify(db, EPISODE_VIDEO_FAILED, episode_id, "No primary stories")
             db.commit()
             return {"episode_id": episode_id, "status": "failed", "error": "No primary stories"}
 
@@ -256,6 +258,10 @@ def produce_episode_video(episode_id: int) -> dict:
             # Intro/outro clips may still be in video_paths even if
             # every story failed -- that's not a usable episode video.
             episode.video_status = "failed"
+            notify(
+                db, EPISODE_VIDEO_FAILED, episode_id,
+                f"No stories produced successfully ({failed} failed)",
+            )
             db.commit()
             return {
                 "episode_id": episode_id,
@@ -274,6 +280,7 @@ def produce_episode_video(episode_id: int) -> dict:
             db.commit()
         except Exception as exc:
             episode.video_status = "failed"
+            notify(db, EPISODE_VIDEO_FAILED, episode_id, f"concat failed: {exc}")
             db.commit()
             print(f"[episode_video] Concat failed for episode {episode_id}: {exc}")
             return {"episode_id": episode_id, "status": "failed", "error": f"concat failed: {exc}"}

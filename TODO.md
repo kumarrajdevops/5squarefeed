@@ -1567,6 +1567,113 @@ auto-blocking).
       completed too** before its first real publish's links will be
       clickable -- add it to the prod setup checklist.
 
+### This session — 2026-09-21/22, part 35 (Notification Worker: detection + audit trail, no delivery yet)
+
+- [x] Scoped via explicit user decisions before building (matching
+      this project's habit of pinning down design questions rather
+      than guessing): **no real delivery channel yet** (email/Slack) --
+      build detection + a DB record + a loud worker-log line only, add
+      real delivery later. **Trigger scope deliberately narrow**: only
+      episode video production totally failing and YouTube publish
+      failing -- explicitly NOT individual story content failures
+      (already tolerated/expected by design, would be noisy) and NOT
+      QA check failures (soft signal, `duration_target` is a known,
+      always-fails limitation, not a real problem).
+- [x] New `Notification` model (migration `c8f1a5d92e63`): `category`
+      (fixed small set: `episode_video_failed` /
+      `episode_publish_failed`), `episode_id`, `message`, `created_at`.
+      New `app/notifications/notifier.py`: `notify(db, category,
+      episode_id, message)` -- takes the caller's existing db session
+      (same pattern as `mark_content_failed()` in
+      `app/tasks/content.py`) rather than opening a new one, so it's
+      naturally atomic with the failure-status commit that already
+      happens right after it, and is directly unit-testable (no
+      `SessionLocal()` of its own to mock around).
+- [x] Wired into all 3 real failure points in
+      `app/tasks/episode_video.py` ("No primary stories", "No stories
+      produced successfully", concat failing) and the 1 failure point
+      in `app/tasks/publishing.py` (any exception during upload).
+      New `GET /api/v1/notifications` endpoint (newest first) -- the
+      only way to see them right now short of the worker's own logs,
+      since there's no dashboard panel or real delivery yet.
+- [x] **Verified live with real triggers, not mocks**: inserted a
+      throwaway episode with zero primary stories, called `/produce`,
+      confirmed the exact log line
+      (`[notification] ALERT (episode_video_failed) episode_id=14: No
+      primary stories`) and a correctly-shaped row via
+      `GET /api/v1/notifications`. Then set that same episode to
+      `approved`/`ready` with a deliberately nonexistent `video_path`,
+      called `/publish`, confirmed a real `FileNotFoundError` from the
+      actual upload attempt correctly produced an
+      `episode_publish_failed` notification with the real error
+      message. Cleaned up the throwaway episode and its test
+      notifications afterward. Added `tests/test_notifier.py` (3 new
+      tests: persists correctly, allows a null `episode_id`, doesn't
+      auto-commit). Full `pytest` suite: 95 tests, all passing.
+- [x] ~~No real delivery channel wired up~~ -- Slack delivery added,
+      see "part 36" below.
+- [ ] No dashboard UI for notifications -- the API endpoint is the only
+      way to see them today. Not asked for this pass; straightforward
+      to add later (mirrors every other list view in the dashboard).
+
+### This session — 2026-09-22, part 36 (real Slack delivery for the Notification Worker)
+
+- [x] User created a real Slack workspace (`5squarefeed.slack.com`,
+      `#dev-alerts` channel) and asked to wire it up. First attempt
+      went a different route than planned: a Slack app with OAuth bot
+      scopes + **Token Rotation** enabled (access token + refresh
+      token, the refresh token itself rotating on every use) rather
+      than a plain Incoming Webhook -- meaningfully more complex to
+      support correctly (would need a durable place to persist a
+      constantly-changing refresh token, not just `.env`). Presented
+      the tradeoff rather than silently building either path; user
+      chose to switch to a plain Incoming Webhook instead (their
+      existing app, just enabling that feature) -- no code changes
+      needed since `_send_slack_alert()` was already built for a
+      static webhook URL.
+- [x] `app/notifications/notifier.py`: `notify()` now posts to
+      `SLACK_WEBHOOK_URL` (new optional setting, `app/config.py`) when
+      configured, via a plain `requests.post` -- never raises out to
+      the caller (a Slack outage must never break the failure-handling
+      flow that's already invoking `notify()` from inside its own
+      except block). New `Notification.delivered` column (migration
+      `d3e7b4a2c951`) records whether that post actually succeeded --
+      `False` both when unconfigured and when the post itself fails,
+      same "absence is a valid, non-error state" pattern as
+      `verification_status`'s `"pending"`.
+- [x] **Real bug caught in my own new tests, not shipped**: the first
+      draft of the new Slack-delivery tests called `notify()` then
+      queried the DB without an intervening commit/flush -- the
+      `db_session` fixture uses `autoflush=False`, so the query
+      couldn't see the pending row yet. Caught immediately by running
+      the suite (3 failures), fixed by adding the missing
+      `db_session.commit()` calls, matching the existing tests' own
+      pattern right next to them.
+- [x] **Separately caught and fixed before it could bite in production**:
+      the initial test design didn't account for `settings` being
+      loaded ambiently from the real `.env` -- once a real
+      `SLACK_WEBHOOK_URL` exists, running `pytest` with no test-side
+      guard would have made every `notify()` call in the test suite
+      **actually post to the real #dev-alerts channel** (test messages
+      like "No primary stories", "concat failed: boom"). Fixed with an
+      autouse fixture that force-disables the webhook for every test
+      in the file by default; the handful of tests that specifically
+      exercise Slack delivery re-enable it with a fake URL and mock
+      `requests.post`, never touching the real network.
+- [x] **Verified live end-to-end with the real webhook**: recreated
+      containers to load `SLACK_WEBHOOK_URL`, confirmed
+      `settings.slack_webhook_url` loaded correctly, created a
+      throwaway episode with zero primary stories, triggered
+      `/produce`, confirmed via `GET /api/v1/notifications` that
+      `delivered: true` (a real, successful HTTPS POST to Slack's API,
+      not a mock) -- and asked the user to independently confirm the
+      alert actually appeared in `#dev-alerts`. Cleaned up the
+      throwaway episode/notification afterward. `tests/test_notifier.py`
+      now has 7 tests (persistence, null episode_id, no-auto-commit,
+      undelivered-when-unconfigured, delivers-when-configured,
+      undelivered-when-Slack-post-fails). Full `pytest` suite: 98
+      tests, all passing.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -1631,11 +1738,14 @@ original `project.md` description was broader than what's built:
 - [x] Final Human Approval workflow -- Approve/Reject buttons in the
       dashboard, see "part 10" onward above. Manual only, no
       auto-approval, per the architecture.
-- [~] Publishing Worker -- YouTube built (see "part 30" above: manual
-      publish button, real API integration, untested against a real
-      account pending OAuth credentials). Instagram not started.
+- [~] Publishing Worker -- YouTube built and verified live for dev
+      (see "part 30" and the dev/prod credential-split session above:
+      manual publish button, real API integration, a real
+      `/publish` call successfully uploaded to the dev channel).
+      Prod channel/credentials not set up yet. Instagram not started.
 - [ ] Analytics Worker (views, retention, watch time, shares, likes/comments, followers)
-- [ ] Notification Worker (failure alerts)
+- [x] Notification Worker -- detection + audit trail + real Slack
+      delivery (see part 35/36 below), verified live end-to-end.
 - [ ] Optimization Engine (feed analytics back into ranking)
 - [ ] AWS evolution (EventBridge scheduled jobs, RDS, S3)
 - [ ] Kubernetes/EKS evolution

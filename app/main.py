@@ -10,7 +10,7 @@ from sqlalchemy import select, text
 from app.config import settings
 from app.content.video_composer import probe_video
 from app.db import SessionLocal
-from app.models import Episode, EpisodeStory, Story, StoryContent
+from app.models import Episode, EpisodeStory, Notification, Story, StoryContent
 from app.tasks.content import generate_script_task
 from app.tasks.dedup import deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
@@ -496,6 +496,36 @@ def list_episodes():
             })
 
         return result
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(limit: int = 50):
+    """
+    Failure-alert log, newest first (see app/notifications/notifier.py
+    -- episode video production totally failing, or a YouTube publish
+    failing; nothing else triggers one, by design). Always recorded
+    here regardless of Slack delivery (`delivered` reflects whether
+    that actually succeeded) -- this endpoint is the full audit trail,
+    Slack is just the real-time page.
+    """
+    limit = max(1, min(limit, 200))
+
+    with SessionLocal() as db:
+        notifications = db.scalars(
+            select(Notification).order_by(Notification.created_at.desc()).limit(limit)
+        ).all()
+
+        return [
+            {
+                "id": n.id,
+                "created_at": n.created_at,
+                "category": n.category,
+                "episode_id": n.episode_id,
+                "message": n.message,
+                "delivered": n.delivered,
+            }
+            for n in notifications
+        ]
 
 
 @app.get("/api/v1/episodes/latest")

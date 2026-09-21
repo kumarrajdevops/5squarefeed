@@ -552,6 +552,43 @@ Until the currently-selected pair is fully set, `/publish` fails fast
 with a clear `YouTubeNotConfigured` error -- before ever touching the
 network -- rather than an opaque auth failure.
 
+## Notifications
+
+A narrow, deliberately-not-noisy failure-alert system (see
+`app/notifications/notifier.py`) -- only two things trigger one:
+episode video production totally failing, or a YouTube publish
+failing. Nothing else does: a single story's content generation
+failing is already tolerated by design (that story is just excluded),
+and Automated QA's `duration_target` check failing is a known,
+documented limitation, not a real problem -- alerting on either would
+just be noise.
+
+```bash
+# Every alert ever recorded, newest first
+curl http://localhost:8000/api/v1/notifications
+```
+
+Every alert is recorded in the `notifications` table regardless of
+delivery -- that's the durable audit trail. Real-time delivery is via
+a Slack Incoming Webhook, optional:
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+```
+
+Create one at [api.slack.com/apps](https://api.slack.com/apps) → your
+app → **Incoming Webhooks** → activate → **Add New Webhook to
+Workspace** → pick the channel. (Not a Slack app with OAuth bot scopes
+-- if it offers you an access token *and* a refresh token, that's
+**Token Rotation**, a different and more complex setup than this
+project supports today, since the refresh token itself changes on
+every use and would need somewhere durable to live besides `.env`.
+Use the plain Incoming Webhook feature instead.) Each `Notification`
+row's `delivered` field reflects whether the Slack post actually
+succeeded -- `false` both when no webhook is configured and when the
+post itself fails; a Slack outage never breaks the pipeline's own
+failure handling, since delivery is always best-effort.
+
 ## Inspecting results
 
 ```bash
@@ -579,7 +616,7 @@ docker exec 5squarefeed-api-1 pip install -r requirements-dev.txt
 docker exec -w /app 5squarefeed-api-1 pytest
 ```
 
-92 tests, no running Postgres required -- DB-backed tests use an
+98 tests, no running Postgres required -- DB-backed tests use an
 in-memory SQLite database (`tests/conftest.py`'s `db_session` fixture;
 every model uses portable column types, so this is a faithful stand-in)
 rather than the real dev database. Covers the deterministic filters
