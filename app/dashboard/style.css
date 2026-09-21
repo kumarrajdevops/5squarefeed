@@ -202,6 +202,56 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-warn { background: var(--skip-bg); color: var(--skip); border-color: var(--skip); }
 
+/* Collect New Stories (dev/local only) */
+
+.collect-panel { margin-bottom: 24px; }
+
+.collect-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.collect-sources {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.collect-result {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  min-height: 1.2em;
+}
+
+.collect-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  margin-right: 4px;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+}
+
 /* Episode Studio */
 
 .studio-header {

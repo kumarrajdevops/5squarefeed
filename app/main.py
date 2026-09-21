@@ -127,11 +127,29 @@ def startup() -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ai-news-api"}
+    return {"status": "ok", "service": "ai-news-api", "app_env": settings.app_env}
+
+
+# Fail-closed allow-list: manual ingestion only runs in these
+# environments. Everything else (prod, production, prd, empty/unset,
+# any unrecognized value) is rejected -- this only ever guards the two
+# manual HTTP trigger endpoints below, never the Celery task functions
+# themselves, so the scheduled Beat cycle (which calls those task
+# functions directly, not through this API) is completely unaffected.
+NON_PRODUCTION_APP_ENVS = {"local", "dev"}
+
+
+def _reject_if_not_dev() -> None:
+    if settings.app_env.strip().lower() not in NON_PRODUCTION_APP_ENVS:
+        raise HTTPException(
+            status_code=403,
+            detail="Manual ingestion is only available in local/dev environments.",
+        )
 
 
 @app.post("/api/v1/ingestion/rss")
 def trigger_rss_ingestion():
+    _reject_if_not_dev()
     task = ingest_news.delay()
     return {"task_id": task.id, "status": "queued"}
 
@@ -144,6 +162,7 @@ def trigger_hackernews_ingestion():
     separate endpoint/task from RSS so an HN API outage can't affect
     RSS ingestion.
     """
+    _reject_if_not_dev()
     task = ingest_hackernews_stories.delay()
     return {"task_id": task.id, "status": "queued"}
 

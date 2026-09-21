@@ -157,19 +157,204 @@ const apiPatch = (path, body) => apiSend("PATCH", path, body);
 const app = document.getElementById("app");
 let currentEpisode = null;
 let editingStoryId = null;
+let appEnv = null;
 
 function getEpisodeIdFromUrl() {
   const id = new URLSearchParams(location.search).get("episode");
   return id ? parseInt(id, 10) : null;
 }
 
+// Mirrors the backend's fail-closed allow-list (app/main.py's
+// NON_PRODUCTION_APP_ENVS) -- the dashboard only ever hides/shows the
+// button, the backend endpoint enforces this for real, so if the two
+// ever disagree the worst case is a visible button that the backend
+// still correctly rejects, never the other way around.
+const DEV_APP_ENVS = new Set(["local", "dev"]);
+function isDevEnvironment(env) {
+  return typeof env === "string" && DEV_APP_ENVS.has(env.trim().toLowerCase());
+}
+
 async function init() {
+  try {
+    const health = await fetch("/health").then((res) => res.json());
+    appEnv = health.app_env;
+  } catch (err) {
+    appEnv = null; // Fail closed on the dashboard too -- unknown env hides the button.
+  }
+
   const episodeId = getEpisodeIdFromUrl();
   if (episodeId) {
     await renderEpisodeStudio(episodeId);
   } else {
     await renderEpisodeList();
   }
+}
+
+// ---------------------------------------------------------
+// Collect New Stories (dev/local only) -- fires the two existing
+// manual ingestion endpoints, which call the same ingest_news /
+// ingest_hackernews_stories Celery tasks the production Beat schedule
+// already uses. There's no task-status infrastructure to honestly
+// report ingestion as *finished* -- the only real signal available is
+// re-polling the existing GET /api/v1/stories endpoint to see whether
+// anything newer than the click has become available. "Queued" and
+// "new stories available" are deliberately kept as distinct, separately
+// labeled states; neither is ever presented as "ingestion completed."
+//
+// Deliberately a compact operational control, not a story browser --
+// this panel never renders individual stories/headlines. GET
+// /api/v1/stories stays available for later dev tooling (a dedicated
+// Stories/Inbox page); this control only ever shows counts.
+// ---------------------------------------------------------
+
+const COLLECTION_SOURCES = [
+  { key: "rss", label: "RSS", path: "/ingestion/rss" },
+  { key: "hackernews", label: "Hacker News", path: "/ingestion/hackernews" },
+];
+
+const BASELINE_FETCH_LIMIT = 20; // also the polling fetch size
+const MIN_LOADING_MS = 1000;     // UI pacing only -- not a real ingestion duration
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 20000;
+const SUCCESS_COLLAPSE_MS = 8000; // how long the success summary stays up before collapsing
+
+let collectCollapseTimer = null;
+
+// Baseline is the latest `collected_at` among currently-visible stories
+// (GET /api/v1/stories, unmodified) -- not database id. The endpoint
+// sorts by published_at, not insertion order, and id ordering is a
+// DB-internal detail; collected_at is the actual moment the server
+// wrote each row, which is what "new since I clicked" should mean.
+//
+// If there are no stories at all yet, the fallback baseline is this
+// BROWSER's current clock, read immediately before the ingestion
+// requests are sent. That is the one place this feature assumes the
+// browser and server clocks are reasonably in sync -- every other
+// baseline value comes from a server-generated collected_at the API
+// already returned, so no cross-clock comparison happens there.
+async function captureCollectionBaseline() {
+  try {
+    const stories = await apiGet(`/stories?limit=${BASELINE_FETCH_LIMIT}`);
+    if (stories.length > 0) {
+      return stories.reduce(
+        (latest, s) => (new Date(s.collected_at) > new Date(latest) ? s.collected_at : latest),
+        stories[0].collected_at
+      );
+    }
+  } catch (err) {
+    // Fall through to the browser-clock fallback below.
+  }
+  return new Date().toISOString();
+}
+
+function wireCollectButton() {
+  const btn = document.getElementById("collect-btn");
+  const sourcesEl = document.getElementById("collect-sources");
+  const resultEl = document.getElementById("collect-result");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    clearTimeout(collectCollapseTimer);
+    resultEl.innerHTML = "";
+
+    const startTime = Date.now();
+    const baseline = await captureCollectionBaseline();
+
+    const state = COLLECTION_SOURCES.map((s) => ({ ...s, done: false, ok: null, taskId: null, error: null }));
+
+    const renderSources = () => {
+      sourcesEl.innerHTML = state.map((s) => {
+        if (!s.done) return `${s.label} …`;
+        return s.ok
+          ? `${s.label} ✓`
+          : `${s.label} ✕ <span class="collect-detail">${escapeHtml(s.error)}</span>`;
+      }).join("<br>");
+    };
+
+    const tick = () => {
+      btn.innerHTML = `<span class="spinner" aria-hidden="true"></span> Collecting… ${formatElapsed(Date.now() - startTime)}`;
+    };
+    tick();
+    renderSources();
+    const timerInterval = setInterval(tick, 1000);
+
+    const requests = state.map((s) =>
+      apiPost(s.path)
+        .then((result) => { s.done = true; s.ok = true; s.taskId = result.task_id; renderSources(); })
+        .catch((err) => { s.done = true; s.ok = false; s.error = err.message; renderSources(); })
+    );
+
+    await Promise.allSettled(requests);
+
+    const elapsedSoFar = Date.now() - startTime;
+    if (elapsedSoFar < MIN_LOADING_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsedSoFar));
+    }
+
+    const stopLoading = () => {
+      clearInterval(timerInterval);
+      btn.disabled = false;
+      btn.textContent = "Collect New Stories";
+    };
+
+    if (state.some((s) => !s.ok)) {
+      stopLoading();
+      resultEl.innerHTML = `<strong>Collection failed</strong>`;
+      // Per-source ✓/✕ (with error detail on the failed one) stays
+      // visible in collect-sources -- not auto-collapsed, since a
+      // failure needs to stay visible until the user acts again.
+      return;
+    }
+
+    // Queued successfully -- now poll for availability. Button label
+    // stays in the spinner/timer state through this phase too, since
+    // the user is still waiting on a real result, not just a queued
+    // confirmation.
+    const pollStart = Date.now();
+    let found = null;
+
+    while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const stories = await apiGet(`/stories?limit=${BASELINE_FETCH_LIMIT}`);
+        const newOnes = stories.filter((s) => new Date(s.collected_at) > new Date(baseline));
+        if (newOnes.length > 0) {
+          found = newOnes;
+          break;
+        }
+      } catch (err) {
+        // Transient fetch error -- keep polling, next tick will retry.
+      }
+    }
+
+    stopLoading();
+
+    if (found) {
+      const rssCount = found.filter((s) => s.source_type === "rss").length;
+      const hnCount = found.filter((s) => s.source_type === "hackernews").length;
+      const otherCount = found.length - rssCount - hnCount;
+      const breakdown = [`RSS ${rssCount}`, `Hacker News ${hnCount}`];
+      if (otherCount > 0) breakdown.push(`Other ${otherCount}`);
+      const taskIds = state.map((s) => `${s.label} task: ${escapeHtml(s.taskId)}`).join(" · ");
+      resultEl.innerHTML =
+        `<strong>✓ ${found.length} new ${found.length === 1 ? "story" : "stories"} available</strong><br>` +
+        `${breakdown.join(" · ")}<br>` +
+        `<span class="collect-detail">${taskIds}</span>`;
+
+      // Collapse back to the compact idle state after giving the user
+      // time to read the summary -- only for a successful result;
+      // timeout/failure messages stay until the next click.
+      collectCollapseTimer = setTimeout(() => {
+        sourcesEl.innerHTML = "";
+        resultEl.innerHTML = "";
+      }, SUCCESS_COLLAPSE_MS);
+    } else {
+      resultEl.innerHTML =
+        "Collection is still processing.<br>No new stories available yet.";
+    }
+  });
 }
 
 // ---------------------------------------------------------
@@ -187,8 +372,26 @@ async function renderEpisodeList() {
     return;
   }
 
+  const collectPanelHtml = isDevEnvironment(appEnv)
+    ? `
+      <div class="panel collect-panel">
+        <div class="collect-row">
+          <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
+          <span id="collect-sources" class="collect-sources"></span>
+        </div>
+        <p id="collect-result" class="collect-result"></p>
+      </div>
+    `
+    : "";
+
+  const wireDevPanels = () => {
+    if (!isDevEnvironment(appEnv)) return;
+    wireCollectButton();
+  };
+
   if (!episodes.length) {
-    app.innerHTML = '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
+    app.innerHTML = collectPanelHtml + '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
+    wireDevPanels();
     return;
   }
 
@@ -206,6 +409,7 @@ async function renderEpisodeList() {
 
   app.innerHTML = `
     <h1>Episodes</h1>
+    ${collectPanelHtml}
     <table class="episode-list">
       <thead>
         <tr><th>ID</th><th>Run date</th><th>Status</th><th>Video</th><th>QA</th><th>Publish</th><th>Primary / Backup</th></tr>
@@ -213,6 +417,8 @@ async function renderEpisodeList() {
       <tbody>${rows}</tbody>
     </table>
   `;
+
+  wireDevPanels();
 
   app.querySelectorAll("tr.row-link").forEach((tr) => {
     tr.addEventListener("click", () => {

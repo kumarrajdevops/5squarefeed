@@ -169,6 +169,41 @@ Everything below (manual ingest/produce/QA endpoints) still works the
 same way and is useful for testing, backfilling, or triggering a step
 out of cycle.
 
+### Dev usage: "Collect New Stories" dashboard button
+
+The Episodes list page shows a **Collect New Stories** button, but
+only when `APP_ENV` is `local` or `dev` (`.env`'s `APP_ENV`, exposed
+via `GET /health`'s `app_env` field). Clicking it calls the same two
+manual endpoints below (`POST /api/v1/ingestion/rss` and
+`POST /api/v1/ingestion/hackernews`), which enqueue the exact same
+`ingest_news`/`ingest_hackernews_stories` Celery tasks the production
+schedule already uses -- nothing is duplicated. It:
+
+- Stores whatever's currently available from RSS + Hacker News into
+  the dev Postgres database, so you don't have to wait for the
+  scheduled IST times to get stories to test with.
+- Does **not** rank, produce, QA, or publish anything -- it only runs
+  collection.
+- Is a compact operational control, not a story browser -- it shows a
+  spinner + elapsed timer, per-source `✓`/`✕` status, and once queued
+  polls `GET /api/v1/stories` (unmodified) every ~2s for up to ~20s to
+  report a count once new stories become available (e.g. "3 new
+  stories available -- RSS 2 · Hacker News 1"), or "Collection is
+  still processing" if the window elapses first -- never "completed,"
+  since there's no infrastructure in place to confirm the Celery tasks
+  have actually finished running. The success summary auto-collapses
+  back to the plain button after a few seconds; failures stay visible
+  until you try again. No headlines/story list are shown on this page
+  -- `GET /api/v1/stories` remains available for a future dedicated
+  Stories/Inbox page.
+
+**In production** (`APP_ENV=prod`), both endpoints reject manual
+requests with `403 Forbidden` ("Manual ingestion is only available in
+local/dev environments"), whether or not the button is visible --
+production collection only ever happens via the scheduled Celery Beat
+cycle above, which calls the same task functions directly and is
+completely unaffected by this restriction.
+
 ## Running the pipeline
 
 **1. Ingest news** (pulls from all enabled RSS sources, filters for
