@@ -1,85 +1,84 @@
-from app.db import SessionLocal
 from app.filters.dedup import find_duplicate_match
-from app.models import Story
-from app.tasks.content_dedup import enrich_and_dedup_by_content
-from app.worker.celery_app import celery_app
+from app.models import NewsItem, StoryState
 
 
-@celery_app.task
-def deduplicate_new_stories() -> dict:
+def deduplicate_new_stories(db, target_date) -> dict:
     """
-    Group AI-candidate stories that describe the same underlying
-    story into duplicate clusters.
+    Group AI-candidate stories collected for target_date that describe
+    the same underlying story into duplicate clusters (title
+    similarity). Same-batch only -- a previous day's stories were
+    already resolved by their own processing run.
 
     Scope: only ai_candidate stories are deduplicated. not_ai stories
     never reach ranking/publishing, so spending compute deduping them
     would be wasted work.
 
-    Idempotent-ish design: each run only looks at stories that are
-    still ungrouped (canonical_story_id IS NULL). Already-canonical
-    stories from previous runs are pulled in as the comparison pool,
-    so new stories get checked against everything that's canonical
-    so far -- but stories already marked as duplicates are never
-    re-examined.
+    Plain function, takes `db`/`target_date` explicitly -- called
+    directly by app/tasks/scheduled.py's run_daily_processing() as one
+    step in a sequence, not auto-chained via .delay() (that auto-chain
+    is gone; see app/tasks/ingestion.py's docstring for why). Commits
+    its own work at the end, same as before -- an earlier/later stage
+    failing doesn't roll this stage back.
     """
 
     checked = 0
     duplicates_found = 0
 
-    with SessionLocal() as db:
+    # -------------------------------------------------
+    # Pull every ungrouped AI-candidate story collected for
+    # target_date, oldest first. Oldest-first means the earliest-
+    # published story in a matching cluster naturally becomes
+    # canonical, which is a reasonable default (first outlet to
+    # report something is usually the primary source).
+    # -------------------------------------------------
 
-        # -------------------------------------------------
-        # Pull every ungrouped AI-candidate story, oldest first.
-        # Oldest-first means the earliest-published story in a
-        # matching cluster naturally becomes canonical, which is
-        # a reasonable default (first outlet to report something
-        # is usually the primary source).
-        # -------------------------------------------------
+    rows = (
+        db.query(NewsItem, StoryState)
+        .join(StoryState, StoryState.id == NewsItem.id)
+        .filter(
+            NewsItem.collection_date == target_date,
+            StoryState.ai_relevance == "ai_candidate",
+            StoryState.canonical_story_id.is_(None),
+        )
+        .order_by(NewsItem.published_at.asc())
+        .all()
+    )
 
-        ungrouped_stories = (
-            db.query(Story)
-            .filter(
-                Story.ai_relevance == "ai_candidate",
-                Story.canonical_story_id.is_(None),
-            )
-            .order_by(Story.published_at.asc())
-            .all()
+    # Stories confirmed canonical during this pass -- plain NewsItem
+    # objects, since find_duplicate_match only needs .id/.title/
+    # .published_at, all of which live on NewsItem.
+    canonical_pool: list[NewsItem] = []
+
+    for item, state in rows:
+
+        checked += 1
+
+        match, reason = find_duplicate_match(
+            candidate_title=item.title,
+            candidate_published_at=item.published_at,
+            candidate_id=item.id,
+            canonical_pool=canonical_pool,
         )
 
-        # Stories confirmed canonical during this pass. Starts empty
-        # and grows as we walk through ungrouped_stories in order.
-        canonical_pool: list[Story] = []
+        if match is not None:
+            # Link this story to its canonical match. The row is
+            # kept, not deleted -- required for audit history.
+            state.canonical_story_id = match.id
+            state.dedup_reason = reason
+            duplicates_found += 1
 
-        for story in ungrouped_stories:
-
-            checked += 1
-
-            match, reason = find_duplicate_match(
-                candidate_title=story.title,
-                candidate_published_at=story.published_at,
-                candidate_id=story.id,
-                canonical_pool=canonical_pool,
+            print(
+                f"[dedup] Story {item.id} ({item.title!r}) "
+                f"marked as duplicate of story {match.id} "
+                f"({match.title!r}) -- {reason}"
             )
+        else:
+            # No match found; this story becomes (or remains) a
+            # canonical representative other stories can match
+            # against for the rest of this pass.
+            canonical_pool.append(item)
 
-            if match is not None:
-                # Link this story to its canonical match. The row is
-                # kept, not deleted -- required for audit history.
-                story.canonical_story_id = match.id
-                story.dedup_reason = reason
-                duplicates_found += 1
-
-                print(
-                    f"[dedup] Story {story.id} ({story.title!r}) "
-                    f"marked as duplicate of story {match.id} "
-                    f"({match.title!r}) -- {reason}"
-                )
-            else:
-                # No match found; this story becomes (or remains) a
-                # canonical representative other stories can match
-                # against for the rest of this pass.
-                canonical_pool.append(story)
-
-        db.commit()
+    db.commit()
 
     result = {
         "checked": checked,
@@ -87,15 +86,5 @@ def deduplicate_new_stories() -> dict:
     }
 
     print(f"[dedup] Completed: {result}")
-
-    # Content-based dedup + historical repeat detection (full article
-    # text + TF-IDF similarity) run next, same as Fact Extraction +
-    # Verification used to run directly from here -- this is the one
-    # place both ingest_news and ingest_hackernews_stories already
-    # funnel through. That stage chains into verification itself once
-    # it's done (see app/tasks/content_dedup.py).
-    content_dedup_task = enrich_and_dedup_by_content.delay()
-    print(f"[dedup] Queued content-dedup task {content_dedup_task.id}")
-    result["content_dedup_task_id"] = content_dedup_task.id
 
     return result

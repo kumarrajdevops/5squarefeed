@@ -12,7 +12,7 @@ from app.notifications.notifier import (
 
 
 def _make_episode(db):
-    episode = Episode(run_date=date(2026, 9, 22), status="draft")
+    episode = Episode(episode_date=date(2026, 9, 22), status="draft")
     db.add(episode)
     db.flush()
     return episode

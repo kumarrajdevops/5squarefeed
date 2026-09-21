@@ -16,422 +16,324 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 
 
-class Story(Base):
-    __tablename__ = "stories"
+# =================================================================
+# raw schema -- source-of-truth for collected source material.
+# Collect first, process later: nothing in this schema is ever an
+# editorial judgment (no ai_relevance, no ranking, no dedup, no
+# verification, no taxonomy). See app/tasks/ingestion.py /
+# ingestion_hackernews.py, which write here and ONLY here.
+# =================================================================
+
+
+class NewsItem(Base):
+    """
+    One row per source item collected for a given collection_date
+    (the IST calendar day this row was collected FOR -- see
+    app/dates.py's target_collection_date(), not the day collection
+    actually ran). Preserves everything the source exposed for that
+    day; no Top-25/ranking/relevance filtering happens here.
+
+    Identity/technical dedup: NOT url alone. Two unique indexes --
+    (source_name, canonical_url) always, plus a partial
+    (source_name, external_id) WHERE external_id IS NOT NULL for
+    sources with a reliable id (Hacker News's objectID always has
+    one; RSS's guid/id often does, not guaranteed). Repeated
+    collection of the same item updates this row (collected_at,
+    content fields) rather than creating a duplicate.
+    """
+
+    __tablename__ = "news_items"
+    __table_args__ = (
+        UniqueConstraint("source_name", "canonical_url", name="uq_news_items_source_url"),
+        UniqueConstraint(
+            "source_name", "external_id", name="uq_news_items_source_external_id"
+        ),
+        {"schema": "raw"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    url: Mapped[str] = mapped_column(Text, nullable=False)
+
     source_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    source_type: Mapped[str] = mapped_column(String(50),nullable=False,default="rss")
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="rss")
+
+    # Reliable per-source id when the source provides one (HN's
+    # objectID always does; RSS's guid/id sometimes does). Nullable --
+    # the (source_name, external_id) unique index above is PARTIAL
+    # (WHERE external_id IS NOT NULL), so multiple NULLs are allowed.
+    external_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # The item's URL exactly as extracted (.strip()) -- no additional
+    # normalization (tracking-param stripping, case-folding, etc.)
+    # added; revisit only if near-duplicate URLs prove to be a real
+    # problem in practice.
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str | None] = mapped_column(String(255))
+
+    # The source's own publish time -- distinct from collected_at
+    # (when we retrieved it) and collection_date (which coverage day
+    # this row belongs to). Never conflate these three.
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     collected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    author: Mapped[str | None] = mapped_column(String(255))
-    external_id: Mapped[str | None] = mapped_column(String(500))
+
+    # The target_date this row was collected for (app/dates.py's
+    # target_collection_date()) -- the business partition for raw
+    # collection. Indexed: this is the primary lookup processing uses.
+    collection_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+
     raw_summary: Mapped[str | None] = mapped_column(Text)
 
-    # Full extracted article body (see app/content/article_extractor.py
-    # + app/tasks/content_dedup.py) -- NULL until a fetch is attempted
-    # (see content_fetch_status below), and stays NULL if extraction
-    # fails; comparisons fall back to raw_summary/title in that case.
+    # Full extracted article body (see app/content/article_extractor.py)
+    # -- NULL until a fetch is attempted (content_fetch_status lives on
+    # editorial.StoryState, not here, since "was a fetch attempted for
+    # dedup purposes" is an editorial-processing concern, not a raw
+    # collection fact).
     raw_content: Mapped[str | None] = mapped_column(Text)
-
-    # SHA-256 hex digest of normalized raw_content -- a cheap exact-copy
-    # fast path (e.g. syndicated wire content) before ever running the
-    # more expensive TF-IDF similarity comparison. Only set on a
-    # successful fetch (see content_fetch_status, which is the actual
-    # "was a fetch already attempted" idempotency flag -- content_hash
-    # alone can't serve that role since a failed fetch has no content
-    # to hash).
     content_hash: Mapped[str | None] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(
-        String(50),
-        default="collected",
-        nullable=False,
+
+    status: Mapped[str] = mapped_column(String(50), default="collected", nullable=False)
+
+
+class CollectionRun(Base):
+    """
+    One row per complete "Collect News" operation (RSS + Hacker News
+    together, not one row per source) -- the durable, queryable record
+    of what a collection click/scheduled run actually did. Supersedes
+    relying on ephemeral Celery task results for anything the
+    dashboard needs to show after the fact.
+    """
+
+    __tablename__ = "collection_runs"
+    __table_args__ = {"schema": "raw"}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    collection_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # "manual" | "scheduled"
+    trigger_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+
+    # "running" -> "success" | "failed"
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+
+    rss_items_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rss_items_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rss_items_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    hn_items_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hn_items_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hn_items_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
-    ai_relevance: Mapped[str] = mapped_column(
-        String(50),
-        default="pending",
-        nullable=False,
+
+# =================================================================
+# editorial schema -- deduplication, verification, categorization,
+# ranking, episode assembly, production, QA, publishing. Reads from
+# raw.news_items; never mutates or deletes it.
+# =================================================================
+
+
+class StoryState(Base):
+    """
+    1:1 editorial companion to a raw.NewsItem -- id is both this
+    table's PK and its FK to raw.news_items.id (no separate surrogate
+    key; the two rows share one identity). Created by the explicit
+    processing operation (app/tasks/scheduled.py), never by
+    collection -- raw ingestion writes zero rows here.
+    """
+
+    __tablename__ = "stories"
+    __table_args__ = {"schema": "editorial"}
+
+    id: Mapped[int] = mapped_column(
+        ForeignKey("raw.news_items.id"), primary_key=True
     )
 
-    ai_relevance_score: Mapped[float | None] = mapped_column(
-        nullable=True,
-    )
+    ai_relevance: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
+    ai_relevance_score: Mapped[float | None] = mapped_column(nullable=True)
+    filter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    filter_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
-    # -----------------------------------------------------------
-    # Deduplication
-    # -----------------------------------------------------------
-    # NULL = this story is canonical (unique, or the representative
-    # of a duplicate group). Non-null = this story is a duplicate of
-    # the story with that id. We never delete duplicate rows; the
-    # raw article stays in the table for audit purposes, it's just
-    # excluded from downstream ranking/publishing via this pointer.
+    # NULL = canonical (unique, or representative of a duplicate
+    # group). Non-null = duplicate of the editorial.stories row with
+    # that id. Rows are never deleted; just excluded downstream.
     canonical_story_id: Mapped[int | None] = mapped_column(
-        ForeignKey("stories.id"),
-        nullable=True,
-        index=True,
+        ForeignKey("editorial.stories.id"), nullable=True, index=True
     )
+    dedup_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Explanation of why this story was linked to its canonical
-    # story (similarity scores, time delta) -- same audit pattern
-    # as filter_reason on the AI relevance filter.
-    dedup_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
-    # -----------------------------------------------------------
-    # Historical repeat detection (see app/tasks/content_dedup.py) --
-    # a different question from canonical_story_id above.
-    # canonical_story_id groups same-batch duplicates (two stories
-    # ingested around the same time about the same event);
-    # repeats_story_id flags that THIS story covers the same event as
-    # something already narrated as primary in a PAST episode, even
-    # under a different headline/outlet/URL -- content-similarity
-    # based, not identity based (see the "never re-select" identity
-    # check in app/tasks/ranking.py, which this complements). Soft
-    # signal only, same as verification_status below -- does NOT
-    # exclude from ranking eligibility (real false-positive risk found
-    # during live verification at the current, still-unvalidated
-    # similarity threshold; see TODO.md). Surfaced in the dashboard so
-    # a human can decide.
-    # -----------------------------------------------------------
+    # Content-similarity historical-repeat detection -- a different
+    # question from canonical_story_id (same-batch duplicates):
+    # flags that this story covers an event already narrated as
+    # primary in a PAST episode. Soft signal only, never excludes.
     repeats_story_id: Mapped[int | None] = mapped_column(
-        ForeignKey("stories.id"),
-        nullable=True,
-        index=True,
+        ForeignKey("editorial.stories.id"), nullable=True, index=True
     )
+    repeat_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    repeat_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
-    # Observability for the (genuinely fragile) full-article-text
-    # fetch that powers content-based dedup/repeat-detection above.
     # NULL = never attempted. "success" | "empty_extraction" |
-    # "fetch_error" | "non_html". A blocked/paywalled/JS-rendered site
-    # degrades to a status here, never fought (no headless browser, no
-    # CAPTCHA-solving) -- same standing rule as app/sources/
-    # article_fetcher.py.
-    content_fetch_status: Mapped[str | None] = mapped_column(
-        String(20),
-        nullable=True,
-    )
+    # "fetch_error" | "non_html". See app/content/article_extractor.py.
+    content_fetch_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    # -----------------------------------------------------------
-    # Fact Extraction + Verification Engine (see app/extraction/
-    # fact_extractor.py, app/verification/engine.py, app/tasks/
-    # verification.py). Soft signal only -- never gates ranking
-    # eligibility, see verify_story()'s docstring for why.
-    # -----------------------------------------------------------
-
-    # JSON-serialized dict from extract_facts() (companies, products,
-    # events, dates, claims) -- plain-text audit trail, same pattern as
-    # filter_reason/dedup_reason/rank_reason.
-    extracted_facts: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
-    # pending -> verified/unverified. "pending" (never processed by
-    # run_fact_extraction_and_verification yet) is treated as "no
-    # bonus, not flagged either way" wherever this is consumed.
+    # Fact Extraction + Verification Engine + taxonomy -- soft signals,
+    # never gate ranking eligibility.
+    extracted_facts: Mapped[str | None] = mapped_column(Text, nullable=True)
     verification_status: Mapped[str] = mapped_column(
-        String(50),
-        default="pending",
-        nullable=False,
+        String(50), default="pending", nullable=False
     )
-
-    verification_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
-    # Deterministic 5-category taxonomy label (see
-    # app/extraction/taxonomy.py) -- "major_news" | "research" |
-    # "security_policy" | "business" | "developer_tools". Labels only,
-    # by explicit user decision: does NOT affect ranking eligibility or
-    # selection, purely editorial visibility. NULL until
-    # run_fact_extraction_and_verification processes the story (same
-    # timing as extracted_facts/verification_status).
-    taxonomy_category: Mapped[str | None] = mapped_column(
-        String(50),
-        nullable=True,
-    )
-
-    __table_args__ = (
-        UniqueConstraint("url", name="uq_stories_url"),
-    )
+    verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    taxonomy_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
 
 class Episode(Base):
     """
-    One row per ranking/selection run -- conceptually, one row per
-    daily video episode. The actual Top-25 + 5-backup selection for
-    this episode lives in EpisodeStory rows, not here, so this table
-    stays small and simple.
+    One row per coverage day -- conceptually, one row per daily video
+    episode. The actual Top-25 + 5-backup selection lives in
+    EpisodeStory rows, not here.
     """
 
     __tablename__ = "episodes"
+    __table_args__ = (
+        UniqueConstraint("episode_date", name="uq_editorial_episodes_episode_date"),
+        {"schema": "editorial"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    # The calendar day this episode is for (IST daily cycle, per the
-    # architecture's 6 AM IST publication schedule). Not unique --
-    # multiple selection runs on the same day are allowed and each
-    # preserved as its own history entry.
-    run_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # The calendar day this episode is FOR (app/dates.py's
+    # target_collection_date()) -- the business identity. One Episode
+    # per episode_date, enforced by uq_editorial_episodes_episode_date.
+    # Publishing time never determines this; see published_at below,
+    # which is a completely separate concept (when we actually
+    # uploaded to YouTube).
+    episode_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
-    # draft -> (future: approved -> published), managed by the
-    # Editorial Dashboard phase, not this one.
-    status: Mapped[str] = mapped_column(
-        String(50),
-        default="draft",
-        nullable=False,
-    )
+    status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
-    # Final combined episode video -- all primary stories' individual
-    # videos concatenated in rank order. pending -> producing -> ready
-    # (or failed). See app/tasks/episode_video.py.
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
 
-    video_status: Mapped[str] = mapped_column(
-        String(50),
-        default="pending",
-        nullable=False,
-    )
-
-    # Automated Video QA (see app/qa/video_qa.py). pending -> passed/
-    # failed. qa_report is a JSON-serialized list of individual check
-    # results, stored as text (same pattern as the other audit-trail
-    # reason fields elsewhere in this schema).
-    qa_status: Mapped[str] = mapped_column(
-        String(50),
-        default="pending",
-        nullable=False,
-    )
-
+    qa_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     qa_report: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Set when produce_episode_video last successfully completed /
-    # when run_episode_qa last completed -- compared by the dashboard
-    # to flag a QA result as stale (video was reproduced since QA last
-    # ran). See app/tasks/episode_video.py and app/tasks/episode_qa.py.
-    video_produced_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    video_produced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qa_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    qa_run_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    # Set whenever a reorder, swap, or a contained story's script edit
-    # changes what this episode actually contains -- separate from
-    # video_produced_at (Produce didn't necessarily run again yet).
-    # Compared against qa_run_at the same way video_produced_at is, so
-    # the dashboard flags QA as stale after these actions too, not just
-    # after a re-Produce. See app/main.py's reorder/swap/
-    # update_story_content endpoints.
-    content_changed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    # Publishing Worker (YouTube, see app/publishing/youtube_publisher.py
-    # and app/tasks/publishing.py). not_published -> publishing ->
-    # published (or failed). Only reachable once status == "approved"
-    # -- enforced by POST /episodes/{id}/publish, not by this column.
     publish_status: Mapped[str] = mapped_column(
-        String(50),
-        default="not_published",
-        nullable=False,
+        String(50), default="not_published", nullable=False
     )
-
     youtube_video_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     youtube_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    published_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class EpisodeStory(Base):
     """
     One row per (episode, story) selection -- the actual Top-25 +
-    5-backup list for a given episode. A story can appear in more
-    than one episode across separate runs; each run's full snapshot
-    is preserved independently rather than mutating Story itself.
+    5-backup list for a given episode. story_id references
+    editorial.stories.id (== the same raw.news_items.id).
     """
 
     __tablename__ = "episode_stories"
+    __table_args__ = (
+        UniqueConstraint("episode_id", "story_id", name="uq_episode_story"),
+        UniqueConstraint("episode_id", "rank_position", name="uq_episode_rank_position"),
+        {"schema": "editorial"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
     episode_id: Mapped[int] = mapped_column(
-        ForeignKey("episodes.id"),
-        nullable=False,
-        index=True,
+        ForeignKey("editorial.episodes.id"), nullable=False, index=True
     )
-
     story_id: Mapped[int] = mapped_column(
-        ForeignKey("stories.id"),
-        nullable=False,
-        index=True,
+        ForeignKey("editorial.stories.id"), nullable=False, index=True
     )
 
-    # 1-30. 1-25 = primary (publish), 26-30 = backup.
     rank_position: Mapped[int] = mapped_column(Integer, nullable=False)
-
-    # "primary" or "backup".
-    selection_status: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-    )
-
+    selection_status: Mapped[str] = mapped_column(String(20), nullable=False)
     rank_score: Mapped[float] = mapped_column(Float, nullable=False)
-
-    # Breakdown of the score components, for audit/explainability --
-    # same pattern as Story.filter_reason and Story.dedup_reason.
     rank_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("episode_id", "story_id", name="uq_episode_story"),
-        UniqueConstraint(
-            "episode_id", "rank_position", name="uq_episode_rank_position"
-        ),
-    )
 
 
 class StoryContent(Base):
     """
     Generated production artifacts for a single story -- script,
     narration audio, branded visual, and composed video. One row per
-    story (1:1), produced by the app.tasks.content Celery chain.
-
-    Scoped to individual stories rather than whole episodes for now:
-    this is the first pass at the architecture's Script/Voice/
-    Visual/Video stages, proven out end-to-end on one story at a time
-    before being wired up to run across an entire Top-25 episode.
+    story (1:1), keyed to editorial.stories.id.
     """
 
     __tablename__ = "story_content"
+    __table_args__ = {"schema": "editorial"}
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
     story_id: Mapped[int] = mapped_column(
-        ForeignKey("stories.id"),
-        nullable=False,
-        unique=True,
-        index=True,
+        ForeignKey("editorial.stories.id"), nullable=False, unique=True, index=True
     )
 
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Full spoken narration -- headline + summary, concatenated.
-    # This is what gets fed to voice synthesis. Deliberately just the
-    # facts: no "why it matters" editorializing or speculative
-    # commentary.
     script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     audio_duration_seconds: Mapped[float | None] = mapped_column(nullable=True)
-
-    # Real per-sentence timing reported by edge-tts during synthesis
-    # (JSON list of {"text", "start", "end"} in seconds) -- captured at
-    # the voice stage, consumed at the video stage to burn in
-    # frame-accurate captions instead of a proportional character-count
-    # estimate. See app/content/voice_generator.py.
     caption_segments: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     captions_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # pending -> script_ready -> voice_ready -> visual_ready ->
-    # video_ready (or failed, at any stage -- see error_message).
-    status: Mapped[str] = mapped_column(
-        String(50),
-        default="pending",
-        nullable=False,
-    )
-
+    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
-
     updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=True,
+        DateTime(timezone=True), onupdate=lambda: datetime.now(timezone.utc), nullable=True
     )
 
 
 class Notification(Base):
     """
-    Failure-alert record (see app/notifications/notifier.py). Scope is
-    deliberately narrow -- only the two failure classes that mean "the
-    whole day's episode didn't happen" (video production totally
-    failing, YouTube publish failing), not every tolerated/expected
-    failure elsewhere in the pipeline (a single story's content
-    generation failing is already handled gracefully by design; QA's
-    duration_target failing is a known, documented limitation, not a
-    real problem) -- notifying on those would just be noise.
-
-    Delivered via a Slack Incoming Webhook when SLACK_WEBHOOK_URL is
-    configured (app/notifications/notifier.py) -- always recorded here
-    regardless of whether delivery succeeded, so this table stays the
-    audit trail even if Slack itself is down or unconfigured.
+    Failure-alert record. Scope deliberately narrow -- only the two
+    failure classes that mean "the whole day's episode didn't happen."
     """
 
     __tablename__ = "notifications"
+    __table_args__ = {"schema": "editorial"}
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
-    # "episode_video_failed" | "episode_publish_failed" -- a fixed,
-    # small set of categories, not free text, so callers can filter/
-    # group reliably later.
     category: Mapped[str] = mapped_column(String(50), nullable=False)
-
     episode_id: Mapped[int | None] = mapped_column(
-        ForeignKey("episodes.id"),
-        nullable=True,
-        index=True,
+        ForeignKey("editorial.episodes.id"), nullable=True, index=True
     )
-
     message: Mapped[str] = mapped_column(Text, nullable=False)
-
-    # Whether the Slack post actually succeeded -- False both when no
-    # webhook is configured at all and when the post itself failed;
-    # this table remains the source of truth either way.
     delivered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

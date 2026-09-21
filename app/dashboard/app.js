@@ -191,65 +191,51 @@ async function init() {
 }
 
 // ---------------------------------------------------------
-// Collect New Stories (dev/local only) -- fires the two existing
-// manual ingestion endpoints, which call the same ingest_news /
-// ingest_hackernews_stories Celery tasks the production Beat schedule
-// already uses. There's no task-status infrastructure to honestly
-// report ingestion as *finished* -- the only real signal available is
-// re-polling the existing GET /api/v1/stories endpoint to see whether
-// anything newer than the click has become available. "Queued" and
-// "new stories available" are deliberately kept as distinct, separately
-// labeled states; neither is ever presented as "ingestion completed."
+// Collect New Stories (dev/local only) -- fires the single
+// POST /api/v1/collection/run endpoint, which queues ONE
+// app.tasks.collection.run_collection task covering RSS + Hacker
+// News together (one raw.collection_runs row -- see that task's
+// docstring). Collection is deliberately NOT chained into processing
+// (classify/dedup/rank/etc, see app/tasks/scheduled.py) -- this panel
+// only ever reports raw counts, never "new stories available for
+// selection" (that only becomes true after a separate
+// POST /api/v1/episodes/select run for the same date).
 //
-// Deliberately a compact operational control, not a story browser --
-// this panel never renders individual stories/headlines. GET
-// /api/v1/stories stays available for later dev tooling (a dedicated
-// Stories/Inbox page); this control only ever shows counts.
+// The task's own result (read back via GET /api/v1/tasks/{id}/result,
+// wrapping Celery's Redis result backend) is the authoritative source
+// for what happened -- no before/after story-list comparison needed,
+// since run_collection already reports real seen/inserted/updated
+// counts per source directly.
 // ---------------------------------------------------------
 
-const COLLECTION_SOURCES = [
-  { key: "rss", label: "RSS", path: "/ingestion/rss" },
-  { key: "hackernews", label: "Hacker News", path: "/ingestion/hackernews" },
-];
-
-const BASELINE_FETCH_LIMIT = 20; // also the polling fetch size
-const MIN_LOADING_MS = 1000;     // UI pacing only -- not a real ingestion duration
+const MIN_LOADING_MS = 1000;     // UI pacing only -- not a real collection duration
 const POLL_INTERVAL_MS = 2000;
-const POLL_TIMEOUT_MS = 20000;
-const SUCCESS_COLLAPSE_MS = 8000; // how long the success summary stays up before collapsing
+const POLL_TIMEOUT_MS = 30000;
+// Processing includes real video production (TTS + ffmpeg per story,
+// sequential) + QA, not just the classify/dedup/rank stages -- can
+// genuinely take minutes for a full Top-25, unlike Collect's ~20s.
+const PROCESS_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const RESULT_COLLAPSE_MS = 10000; // how long the result summary stays up before collapsing
 
 let collectCollapseTimer = null;
 
-// Baseline is the latest `collected_at` among currently-visible stories
-// (GET /api/v1/stories, unmodified) -- not database id. The endpoint
-// sorts by published_at, not insertion order, and id ordering is a
-// DB-internal detail; collected_at is the actual moment the server
-// wrote each row, which is what "new since I clicked" should mean.
-//
-// If there are no stories at all yet, the fallback baseline is this
-// BROWSER's current clock, read immediately before the ingestion
-// requests are sent. That is the one place this feature assumes the
-// browser and server clocks are reasonably in sync -- every other
-// baseline value comes from a server-generated collected_at the API
-// already returned, so no cross-clock comparison happens there.
-async function captureCollectionBaseline() {
+async function fetchTaskResult(taskId) {
   try {
-    const stories = await apiGet(`/stories?limit=${BASELINE_FETCH_LIMIT}`);
-    if (stories.length > 0) {
-      return stories.reduce(
-        (latest, s) => (new Date(s.collected_at) > new Date(latest) ? s.collected_at : latest),
-        stories[0].collected_at
-      );
-    }
+    return await apiGet(`/tasks/${taskId}/result`);
   } catch (err) {
-    // Fall through to the browser-clock fallback below.
+    return null;
   }
-  return new Date().toISOString();
+}
+
+function formatSourceLine(label, source) {
+  if (!source) return `${label}: no data`;
+  if (source.error) return `${label}: failed -- ${escapeHtml(source.error)}`;
+  const seen = source.items_seen !== undefined ? source.items_seen : source.seen;
+  return `${label}: seen ${seen} · inserted ${source.inserted} · updated ${source.updated}`;
 }
 
 function wireCollectButton() {
   const btn = document.getElementById("collect-btn");
-  const sourcesEl = document.getElementById("collect-sources");
   const resultEl = document.getElementById("collect-result");
   if (!btn) return;
 
@@ -260,38 +246,12 @@ function wireCollectButton() {
     resultEl.innerHTML = "";
 
     const startTime = Date.now();
-    const baseline = await captureCollectionBaseline();
-
-    const state = COLLECTION_SOURCES.map((s) => ({ ...s, done: false, ok: null, taskId: null, error: null }));
-
-    const renderSources = () => {
-      sourcesEl.innerHTML = state.map((s) => {
-        if (!s.done) return `${s.label} …`;
-        return s.ok
-          ? `${s.label} ✓`
-          : `${s.label} ✕ <span class="collect-detail">${escapeHtml(s.error)}</span>`;
-      }).join("<br>");
-    };
 
     const tick = () => {
       btn.innerHTML = `<span class="spinner" aria-hidden="true"></span> Collecting… ${formatElapsed(Date.now() - startTime)}`;
     };
     tick();
-    renderSources();
     const timerInterval = setInterval(tick, 1000);
-
-    const requests = state.map((s) =>
-      apiPost(s.path)
-        .then((result) => { s.done = true; s.ok = true; s.taskId = result.task_id; renderSources(); })
-        .catch((err) => { s.done = true; s.ok = false; s.error = err.message; renderSources(); })
-    );
-
-    await Promise.allSettled(requests);
-
-    const elapsedSoFar = Date.now() - startTime;
-    if (elapsedSoFar < MIN_LOADING_MS) {
-      await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsedSoFar));
-    }
 
     const stopLoading = () => {
       clearInterval(timerInterval);
@@ -299,61 +259,182 @@ function wireCollectButton() {
       btn.textContent = "Collect New Stories";
     };
 
-    if (state.some((s) => !s.ok)) {
+    let queued;
+    try {
+      queued = await apiPost("/collection/run");
+    } catch (err) {
       stopLoading();
-      resultEl.innerHTML = `<strong>Collection failed</strong>`;
-      // Per-source ✓/✕ (with error detail on the failed one) stays
-      // visible in collect-sources -- not auto-collapsed, since a
-      // failure needs to stay visible until the user acts again.
+      resultEl.innerHTML = `<strong>Collection failed to queue</strong><br>${escapeHtml(err.message)}`;
       return;
     }
 
-    // Queued successfully -- now poll for availability. Button label
-    // stays in the spinner/timer state through this phase too, since
-    // the user is still waiting on a real result, not just a queued
-    // confirmation.
+    const elapsedSoFar = Date.now() - startTime;
+    if (elapsedSoFar < MIN_LOADING_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsedSoFar));
+    }
+
     const pollStart = Date.now();
-    let found = null;
+    let finished = null;
 
     while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      try {
-        const stories = await apiGet(`/stories?limit=${BASELINE_FETCH_LIMIT}`);
-        const newOnes = stories.filter((s) => new Date(s.collected_at) > new Date(baseline));
-        if (newOnes.length > 0) {
-          found = newOnes;
-          break;
-        }
-      } catch (err) {
-        // Transient fetch error -- keep polling, next tick will retry.
+      const res = await fetchTaskResult(queued.task_id);
+      if (res && res.status !== "pending") {
+        finished = res;
+        break;
       }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
 
     stopLoading();
 
-    if (found) {
-      const rssCount = found.filter((s) => s.source_type === "rss").length;
-      const hnCount = found.filter((s) => s.source_type === "hackernews").length;
-      const otherCount = found.length - rssCount - hnCount;
-      const breakdown = [`RSS ${rssCount}`, `Hacker News ${hnCount}`];
-      if (otherCount > 0) breakdown.push(`Other ${otherCount}`);
-      const taskIds = state.map((s) => `${s.label} task: ${escapeHtml(s.taskId)}`).join(" · ");
+    if (!finished) {
       resultEl.innerHTML =
-        `<strong>✓ ${found.length} new ${found.length === 1 ? "story" : "stories"} available</strong><br>` +
-        `${breakdown.join(" · ")}<br>` +
-        `<span class="collect-detail">${taskIds}</span>`;
-
-      // Collapse back to the compact idle state after giving the user
-      // time to read the summary -- only for a successful result;
-      // timeout/failure messages stay until the next click.
-      collectCollapseTimer = setTimeout(() => {
-        sourcesEl.innerHTML = "";
-        resultEl.innerHTML = "";
-      }, SUCCESS_COLLAPSE_MS);
-    } else {
-      resultEl.innerHTML =
-        "Collection is still processing.<br>No new stories available yet.";
+        `Collection queued (task ${escapeHtml(queued.task_id)}) -- still running.<br>` +
+        `Check back shortly, or GET /api/v1/raw/collection-runs.`;
+      return;
     }
+
+    if (finished.status === "failed") {
+      resultEl.innerHTML = `<strong>Collection task failed</strong><br>${escapeHtml(finished.error || "")}`;
+      return;
+    }
+
+    const result = finished.result || {};
+    const rssLine = formatSourceLine("RSS", result.rss);
+    const hnLine = formatSourceLine("Hacker News", result.hackernews);
+    const statusLabel = result.status === "success" ? "✓ Collection complete" : `Collection finished (${escapeHtml(result.status || "unknown")})`;
+
+    resultEl.innerHTML =
+      `<strong>${statusLabel}</strong> -- target date ${escapeHtml(result.collection_date || "?")}<br>` +
+      `${rssLine}<br>${hnLine}`;
+
+    collectCollapseTimer = setTimeout(() => {
+      resultEl.innerHTML = "";
+    }, RESULT_COLLAPSE_MS);
+  });
+}
+
+// ---------------------------------------------------------
+// Process Episode (dev/local only) -- fires POST /api/v1/episodes/
+// select, which is now the processing trigger (classify -> dedup ->
+// content-dedup -> verification -> rank/select -> produce -> QA, see
+// app/tasks/scheduled.py's run_daily_processing). Deliberately a
+// separate button/click from Collect New Stories above -- collection
+// and processing are two distinct operations and processing is never
+// auto-run after collection (see app/tasks/collection.py's docstring).
+// No date param is sent -- the server always computes
+// target_collection_date() (today IST - 1 day) itself, the same date
+// Collect just targeted.
+// ---------------------------------------------------------
+
+let processCollapseTimer = null;
+
+function formatProcessSummary(result) {
+  const c = result.classify || {};
+  const d = result.dedup || {};
+  const cd = result.content_dedup || {};
+  const v = result.verification || {};
+  const r = result.ranking || {};
+
+  const lines = [
+    `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates`,
+    `Dedup: ${d.duplicates_found ?? "?"} duplicates found (of ${d.checked ?? "?"} checked)`,
+    `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates, ${cd.historical_repeats_found ?? "?"} historical repeats`,
+    `Verification: ${v.verified ?? "?"} verified / ${v.unverified ?? "?"} unverified`,
+  ];
+
+  if (r.created) {
+    lines.push(`Ranking: created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup`);
+  } else {
+    lines.push(`Ranking: no new episode (${escapeHtml(r.reason || "unknown")}, episode #${r.episode_id ?? "?"})`);
+  }
+
+  if (result.produce_status) lines.push(`Produce: ${escapeHtml(result.produce_status)}`);
+  if (result.qa_status) lines.push(`QA: ${escapeHtml(result.qa_status)}`);
+
+  return lines.join("<br>");
+}
+
+function wireProcessButton() {
+  const btn = document.getElementById("process-btn");
+  const resultEl = document.getElementById("process-result");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    clearTimeout(processCollapseTimer);
+    resultEl.innerHTML = "";
+
+    const startTime = Date.now();
+    const tick = () => {
+      btn.innerHTML = `<span class="spinner" aria-hidden="true"></span> Processing… ${formatElapsed(Date.now() - startTime)}`;
+    };
+    tick();
+    const timerInterval = setInterval(tick, 1000);
+
+    const stopLoading = () => {
+      clearInterval(timerInterval);
+      btn.disabled = false;
+      btn.textContent = "Process Episode";
+    };
+
+    let queued;
+    try {
+      queued = await apiPost("/episodes/select");
+    } catch (err) {
+      stopLoading();
+      resultEl.innerHTML = `<strong>Processing not started</strong><br>${escapeHtml(err.message)}`;
+      return;
+    }
+
+    // A synchronous 200 with no task_id means the endpoint's own
+    // pre-check already decided (existing draft reused) without
+    // queuing anything -- nothing to poll.
+    if (!queued.task_id) {
+      stopLoading();
+      resultEl.innerHTML =
+        `Episode #${queued.episode_id} already exists for ${escapeHtml(queued.episode_date)} ` +
+        `(${escapeHtml(queued.reason || "existing")}) -- nothing queued.`;
+      processCollapseTimer = setTimeout(() => renderEpisodeList(), RESULT_COLLAPSE_MS);
+      return;
+    }
+
+    const pollStart = Date.now();
+    let finished = null;
+
+    while (Date.now() - pollStart < PROCESS_POLL_TIMEOUT_MS) {
+      const res = await fetchTaskResult(queued.task_id);
+      if (res && res.status !== "pending") {
+        finished = res;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+
+    stopLoading();
+
+    if (!finished) {
+      resultEl.innerHTML =
+        `Processing queued (task ${escapeHtml(queued.task_id)}) -- still running.<br>` +
+        `This can take a few minutes (video production + QA) -- check back or refresh.`;
+      return;
+    }
+
+    if (finished.status === "failed") {
+      resultEl.innerHTML = `<strong>Processing task failed</strong><br>${escapeHtml(finished.error || "")}`;
+      return;
+    }
+
+    resultEl.innerHTML = `<strong>✓ Processing complete</strong><br>${formatProcessSummary(finished.result || {})}`;
+
+    // Full re-render replaces this message with the refreshed episode
+    // list (showing the new/updated row) -- delayed so the user has
+    // time to actually read the summary above first, rather than
+    // clearing it immediately.
+    processCollapseTimer = setTimeout(() => {
+      renderEpisodeList();
+    }, RESULT_COLLAPSE_MS);
   });
 }
 
@@ -377,9 +458,10 @@ async function renderEpisodeList() {
       <div class="panel collect-panel">
         <div class="collect-row">
           <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
-          <span id="collect-sources" class="collect-sources"></span>
+          <button class="btn" id="process-btn" type="button">Process Episode</button>
         </div>
         <p id="collect-result" class="collect-result"></p>
+        <p id="process-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -387,6 +469,7 @@ async function renderEpisodeList() {
   const wireDevPanels = () => {
     if (!isDevEnvironment(appEnv)) return;
     wireCollectButton();
+    wireProcessButton();
   };
 
   if (!episodes.length) {
@@ -398,7 +481,7 @@ async function renderEpisodeList() {
   const rows = episodes.map((ep) => `
     <tr class="row-link" data-id="${ep.episode_id}">
       <td>#${ep.episode_id}</td>
-      <td>${ep.run_date}</td>
+      <td>${ep.episode_date}</td>
       <td><span class="pill ${ep.status}">${ep.status}</span></td>
       <td><span class="pill ${ep.video_status}">${ep.video_status}</span></td>
       <td><span class="pill ${ep.qa_status}">${ep.qa_status}</span></td>
@@ -412,7 +495,7 @@ async function renderEpisodeList() {
     ${collectPanelHtml}
     <table class="episode-list">
       <thead>
-        <tr><th>ID</th><th>Run date</th><th>Status</th><th>Video</th><th>QA</th><th>Publish</th><th>Primary / Backup</th></tr>
+        <tr><th>ID</th><th>Episode date</th><th>Status</th><th>Video</th><th>QA</th><th>Publish</th><th>Primary / Backup</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -490,7 +573,7 @@ function renderStudioLayout(ep) {
       <div>
         <h1>Episode #${ep.episode_id}</h1>
         <div class="meta">
-          ${ep.run_date}
+          ${ep.episode_date}
           &nbsp;<span class="pill ${ep.status}">${ep.status}</span>
           <span class="pill ${ep.video_status}">${ep.video_status}</span>
           <span class="pill ${ep.qa_status}">qa: ${ep.qa_status}</span>

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import Episode, EpisodeStory, Story
+from app.models import Episode, EpisodeStory, NewsItem
 from app.notifications.notifier import EPISODE_PUBLISH_FAILED, notify
 from app.publishing.youtube_publisher import build_video_metadata, upload_video
 from app.worker.celery_app import celery_app
@@ -39,8 +39,8 @@ def publish_episode_to_youtube(episode_id: int) -> dict:
 
         try:
             rows = (
-                db.query(EpisodeStory, Story)
-                .join(Story, EpisodeStory.story_id == Story.id)
+                db.query(EpisodeStory, NewsItem)
+                .join(NewsItem, EpisodeStory.story_id == NewsItem.id)
                 .filter(
                     EpisodeStory.episode_id == episode_id,
                     EpisodeStory.selection_status == "primary",
@@ -50,11 +50,11 @@ def publish_episode_to_youtube(episode_id: int) -> dict:
             )
 
             stories = [
-                {"headline": story.title, "source_name": story.source_name, "url": story.url}
-                for _episode_story, story in rows
+                {"headline": item.title, "source_name": item.source_name, "url": item.canonical_url}
+                for _episode_story, item in rows
             ]
 
-            metadata = build_video_metadata(episode.run_date, stories)
+            metadata = build_video_metadata(episode.episode_date, stories)
 
             result = upload_video(
                 video_path=Path(episode.video_path),

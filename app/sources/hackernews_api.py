@@ -1,4 +1,4 @@
-import time
+from datetime import datetime
 
 import requests
 
@@ -16,28 +16,52 @@ MIN_POINTS = 15
 REQUEST_TIMEOUT_SECONDS = 15
 
 
-def fetch_ai_stories(window_hours: float) -> list[dict]:
+def fetch_ai_stories_for_range(start: datetime, end: datetime) -> list[dict]:
     """
-    Fetch Hacker News stories mentioning "AI", posted within the last
-    `window_hours`, with more than MIN_POINTS points.
+    Fetch Hacker News stories mentioning "AI", posted within
+    [start, end), with more than MIN_POINTS points.
 
-    Returns the raw Algolia hit dicts (field mapping into our Story
-    model happens in app/tasks/ingestion_hackernews.py, matching the
-    fetch/orchestrate separation used elsewhere in this codebase).
+    Unlike RSS (which only ever exposes a feed's *current* live
+    contents -- no date-range query exists), the Algolia search API
+    genuinely supports an exact [start, end) window on created_at_i,
+    so collection and "backfill" are the same operation here: this is
+    the ONLY Hacker News fetch function. There used to be a separate
+    rolling `fetch_ai_stories(window_hours, now)` computing its window
+    as "now minus N hours" -- deleted outright (not kept as a
+    fallback) now that every collection call targets an explicit
+    calendar day (see app/dates.py's coverage_window()).
+
+    Paginated (Algolia caps at 100 hits/page) so a real day with more
+    than 100 qualifying stories isn't silently truncated -- unlikely at
+    this project's observed volume (~19-24 qualifying stories/day) but
+    not assumed away.
     """
 
-    window_start_ts = int(time.time() - window_hours * 3600)
+    start_ts = int(start.timestamp())
+    end_ts = int(end.timestamp())
 
-    response = requests.get(
-        HN_SEARCH_URL,
-        params={
-            "tags": "story",
-            "query": "AI",
-            "numericFilters": f"points>{MIN_POINTS},created_at_i>{window_start_ts}",
-            "hitsPerPage": 100,
-        },
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
+    hits: list[dict] = []
+    page = 0
 
-    return response.json().get("hits", [])
+    while True:
+        response = requests.get(
+            HN_SEARCH_URL,
+            params={
+                "tags": "story",
+                "query": "AI",
+                "numericFilters": f"points>{MIN_POINTS},created_at_i>{start_ts},created_at_i<{end_ts}",
+                "hitsPerPage": 100,
+                "page": page,
+            },
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        page_hits = payload.get("hits", [])
+        hits.extend(page_hits)
+
+        if len(page_hits) < 100 or page + 1 >= payload.get("nbPages", 1):
+            break
+        page += 1
+
+    return hits

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import SessionLocal
-from app.models import Episode, EpisodeStory, Story, StoryContent
+from app.models import Episode, EpisodeStory, NewsItem, StoryContent, StoryState
 from app.qa.video_qa import run_qa_checks
 from app.worker.celery_app import celery_app
 
@@ -29,9 +29,10 @@ def run_episode_qa(episode_id: int) -> dict:
         # and QA should judge what's actually in the video, not the
         # original ranking selection.
         rows = (
-            db.query(EpisodeStory, Story, StoryContent)
-            .join(Story, EpisodeStory.story_id == Story.id)
-            .join(StoryContent, StoryContent.story_id == Story.id)
+            db.query(EpisodeStory, NewsItem, StoryState, StoryContent)
+            .join(NewsItem, EpisodeStory.story_id == NewsItem.id)
+            .join(StoryState, StoryState.id == NewsItem.id)
+            .join(StoryContent, StoryContent.story_id == NewsItem.id)
             .filter(
                 EpisodeStory.episode_id == episode_id,
                 EpisodeStory.selection_status == "primary",

@@ -1,17 +1,13 @@
-from datetime import datetime, timedelta, timezone  # Date/time handling
+from datetime import datetime, timezone  # Date/time handling
 
 import feedparser  # Read and parse RSS feeds
 from dateutil import parser as date_parser  # Robust date parsing (RFC 2822 + ISO 8601 + more)
-from sqlalchemy.exc import IntegrityError  # Raised on a uq_stories_url collision
+from sqlalchemy.exc import IntegrityError  # Raised on a raw.news_items identity collision
 
-from app.config import settings  # Application configuration
-from app.db import SessionLocal  # PostgreSQL database session
-from app.filters.ai_relevance import calculate_ai_relevance  # AI relevance filter
-from app.models import Story  # Story database model
+from app.dates import coverage_window  # Single authoritative date/window module
+from app.models import NewsItem  # raw.news_items model
 from app.sources.article_fetcher import fetch_article_summary  # Fallback summary for empty RSS excerpts
 from app.sources.registry import NEWS_SOURCES  # Configured news sources
-from app.tasks.dedup import deduplicate_new_stories  # Duplicate-story grouping
-from app.worker.celery_app import celery_app  # Celery application
 
 
 # Many sites (VentureBeat's Vercel bot-challenge is a known example) block
@@ -49,342 +45,214 @@ def parse_published(value: str | None) -> datetime | None:
         return None
 
 
-@celery_app.task  # Register this function as a Celery background task
-def ingest_news() -> dict:
+def _find_existing_news_item(db, source_name: str, external_id: str | None, canonical_url: str) -> NewsItem | None:
     """
-    Fetch enabled RSS sources and store new stories.
+    Identity per app/models.py's NewsItem: prefer (source_name,
+    external_id) when the source gave us a reliable id, else fall back
+    to (source_name, canonical_url). Same two-index scheme the DB
+    itself enforces (uq_news_items_source_external_id,
+    uq_news_items_source_url) -- this is the read-side half of it.
     """
+    if external_id:
+        existing = (
+            db.query(NewsItem)
+            .filter(NewsItem.source_name == source_name, NewsItem.external_id == external_id)
+            .first()
+        )
+        if existing is not None:
+            return existing
 
-    # ---------------------------------------------------------
-    # Ingestion statistics
-    # ---------------------------------------------------------
-
-    sources_processed = 0  # Number of enabled sources processed
-    articles_seen = 0  # Total RSS articles encountered
-    articles_inserted = 0  # New stories inserted into PostgreSQL
-    duplicates = 0  # Existing stories skipped
-    invalid = 0  # Articles missing required/valid data
-    outside_window = 0  # Articles older than our news window
-    failed_sources = 0  # Sources that failed during processing
-
-    # Per-source breakdown, so we can see which sources actually
-    # contributed stories vs. which ones look "processed" but yielded
-    # nothing (blocked, empty, or malformed).
-    per_source_stats: dict[str, dict[str, int]] = {}
-
-    # ---------------------------------------------------------
-    # Define the current news collection window
-    # ---------------------------------------------------------
-
-    now = datetime.now(timezone.utc)  # Current UTC time
-
-    window_start = now - timedelta(
-        hours=settings.news_window_hours  # Only accept recent articles
+    return (
+        db.query(NewsItem)
+        .filter(NewsItem.source_name == source_name, NewsItem.canonical_url == canonical_url)
+        .first()
     )
 
-    # ---------------------------------------------------------
-    # Open PostgreSQL database session
-    # ---------------------------------------------------------
 
-    with SessionLocal() as db:
+def ingest_news(db, target_date) -> dict:
+    """
+    Fetch enabled RSS sources and store raw source items for
+    target_date (app/dates.py's target_collection_date() -- yesterday
+    in IST, unless a dev-only explicit date is given). Collection only:
+    no ai_relevance, no dedup, no ranking, no editorial fields of any
+    kind are written here (see app/models.py's NewsItem vs StoryState).
 
-        # -----------------------------------------------------
-        # Process every enabled source
-        # -----------------------------------------------------
+    RSS has no historical query capability -- each source's feed is
+    fetched exactly once, as-is (same feedparser call as always), and
+    whatever entries currently happen to be live are kept if their own
+    published_at falls inside target_date's IST calendar day,
+    discarded otherwise. A story published on target_date that has
+    already scrolled out of a feed's live window by the time this
+    runs is NOT recovered -- deliberately deferred, not solved here
+    (see TODO.md/the plan this was built from).
 
-        for source in NEWS_SOURCES:
+    Repeated collection for the same target_date is safe: an item
+    already in raw.news_items (matched by identity, see
+    _find_existing_news_item) has its collected_at refreshed rather
+    than being inserted again.
 
-            if not source["enabled"]:  # Skip disabled sources
-                continue
+    Takes `db` explicitly (same split as app/tasks/episode_video.py's
+    _produce_story_content) so app/tasks/collection.py's orchestrator
+    can call this and app/tasks/ingestion_hackernews.py's HN
+    equivalent within one shared session/CollectionRun row.
+    """
 
-            sources_processed += 1  # Count this source
+    coverage_start, coverage_end = coverage_window(target_date)
 
-            source_seen = 0
-            source_inserted = 0
-            source_duplicates = 0
-            source_invalid = 0
-            source_outside_window = 0
+    sources_processed = 0
+    items_seen = 0
+    items_inserted = 0
+    items_updated = 0
+    invalid = 0
+    outside_window = 0
+    failed_sources = 0
 
-            try:
-                # -------------------------------------------------
-                # Download and parse the RSS feed
-                # -------------------------------------------------
+    per_source_stats: dict[str, dict[str, int]] = {}
 
-                feed = feedparser.parse(
-                    source["url"],  # RSS URL from source registry
-                    agent=FEED_USER_AGENT,  # Look like a real browser/bot, not default urllib
-                )
+    for source in NEWS_SOURCES:
 
-                # -------------------------------------------------
-                # Surface transport-level problems feedparser doesn't
-                # raise as exceptions (HTTP errors, malformed XML).
-                # feedparser sets `status` for HTTP fetches and `bozo`
-                # when the feed body itself failed to parse cleanly.
-                # -------------------------------------------------
+        if not source["enabled"]:
+            continue
 
-                http_status = getattr(feed, "status", None)
+        sources_processed += 1
 
-                if http_status is not None and http_status >= 400:
-                    print(
-                        f"[{source['name']}] HTTP {http_status} fetching feed "
-                        f"— 0 entries will be available even though this "
-                        f"is not counted as a failed_source."
-                    )
+        source_seen = 0
+        source_inserted = 0
+        source_updated = 0
+        source_invalid = 0
+        source_outside_window = 0
 
-                if getattr(feed, "bozo", 0):
-                    bozo_exc = getattr(feed, "bozo_exception", None)
-                    print(
-                        f"[{source['name']}] Feed parsed with warnings "
-                        f"(bozo=1): {bozo_exc}"
-                    )
+        try:
+            feed = feedparser.parse(source["url"], agent=FEED_USER_AGENT)
 
+            http_status = getattr(feed, "status", None)
+
+            if http_status is not None and http_status >= 400:
                 print(
-                    f"[{source['name']}] HTTP status={http_status}, "
-                    f"entries found={len(feed.entries)}"
+                    f"[{source['name']}] HTTP {http_status} fetching feed "
+                    f"— 0 entries will be available even though this "
+                    f"is not counted as a failed_source."
                 )
 
-                # -------------------------------------------------
-                # Process every article in the feed
-                # -------------------------------------------------
+            if getattr(feed, "bozo", 0):
+                bozo_exc = getattr(feed, "bozo_exception", None)
+                print(f"[{source['name']}] Feed parsed with warnings (bozo=1): {bozo_exc}")
 
-                for entry in feed.entries:
+            print(f"[{source['name']}] HTTP status={http_status}, entries found={len(feed.entries)}")
 
-                    articles_seen += 1  # Count this article
-                    source_seen += 1
+            for entry in feed.entries:
 
-                    # Extract article title
-                    title = getattr(
-                        entry,
-                        "title",
-                        None,
+                items_seen += 1
+                source_seen += 1
+
+                title = getattr(entry, "title", None)
+                url = getattr(entry, "link", None)
+
+                if not title or not url:
+                    invalid += 1
+                    source_invalid += 1
+                    print(f"[{source['name']}] REJECTED (invalid): missing title or url. title={title!r} url={url!r}")
+                    continue
+
+                published_value = getattr(entry, "published", None) or getattr(entry, "updated", None)
+                published_at = parse_published(published_value)
+
+                if published_at is None:
+                    invalid += 1
+                    source_invalid += 1
+                    print(
+                        f"[{source['name']}] REJECTED (invalid): unparseable publish date. "
+                        f"raw_value={published_value!r} title={title!r}"
                     )
+                    continue
 
-                    # Extract article URL
-                    url = getattr(
-                        entry,
-                        "link",
-                        None,
-                    )
+                if not (coverage_start <= published_at <= coverage_end):
+                    outside_window += 1
+                    source_outside_window += 1
+                    continue
 
-                    # -------------------------------------------------
-                    # Validate required fields
-                    # -------------------------------------------------
+                canonical_url = url.strip()
+                external_id = getattr(entry, "id", None)
 
-                    if not title or not url:
-                        invalid += 1  # Article cannot be stored
-                        source_invalid += 1
-                        print(
-                            f"[{source['name']}] REJECTED (invalid): "
-                            f"missing title or url. "
-                            f"title={title!r} url={url!r}"
-                        )
-                        continue
+                existing = _find_existing_news_item(db, source["name"], external_id, canonical_url)
 
-                    # -------------------------------------------------
-                    # Check whether this URL already exists
-                    # -------------------------------------------------
+                if existing is not None:
+                    existing.collected_at = datetime.now(timezone.utc)
+                    db.commit()
+                    items_updated += 1
+                    source_updated += 1
+                    continue
 
-                    existing_story = (
-                        db.query(Story)
-                        .filter(Story.url == url)
-                        .first()
-                    )
+                author = getattr(entry, "author", None)
+                summary = getattr(entry, "summary", None)
 
-                    if existing_story:
-                        duplicates += 1  # Skip already collected story
-                        source_duplicates += 1
-                        continue
+                # A minority of RSS entries carry no description at
+                # all (confirmed: NVIDIA Blog's "Heart of the Matter"
+                # story) -- fetch the linked page's own description
+                # rather than leaving the item with nothing.
+                if not summary:
+                    summary = fetch_article_summary(url)
 
-                    # -------------------------------------------------
-                    # Extract publication date
-                    # -------------------------------------------------
-
-                    published_value = (
-                        getattr(entry, "published", None)
-                        or getattr(entry, "updated", None)
-                    )
-
-                    published_at = parse_published(
-                        published_value
-                    )
-
-                    # -------------------------------------------------
-                    # Reject articles without a valid publication date
-                    # -------------------------------------------------
-
-                    if published_at is None:
-                        invalid += 1
-                        source_invalid += 1
-                        print(
-                            f"[{source['name']}] REJECTED (invalid): "
-                            f"unparseable publish date. "
-                            f"raw_value={published_value!r} title={title!r}"
-                        )
-                        continue
-
-                    # -------------------------------------------------
-                    # Reject articles outside our configured time window
-                    # -------------------------------------------------
-
-                    if published_at < window_start:
-                        outside_window += 1
-                        source_outside_window += 1
-                        continue
-
-                    # -------------------------------------------------
-                    # Extract optional RSS fields
-                    # -------------------------------------------------
-
-                    author = getattr(
-                        entry,
-                        "author",
-                        None,
-                    )
-
-                    summary = getattr(
-                        entry,
-                        "summary",
-                        None,
-                    )
-
-                    # A minority of RSS entries carry no description at
-                    # all (confirmed: NVIDIA Blog's "Heart of the
-                    # Matter" story). Same gap and same fix already
-                    # used for Hacker News link-posts, whose API never
-                    # provides article content in the first place --
-                    # fetch the linked page's own description rather
-                    # than leaving the story with nothing.
-                    if not summary:
-                        summary = fetch_article_summary(url)
-
-                    external_id = getattr(
-                        entry,
-                        "id",
-                        None,
-                    )
-
-                    # -------------------------------------------------
-                    # Run deterministic AI relevance filter
-                    # -------------------------------------------------
-
-                    ai_relevance, ai_score, filter_reason = (
-                        calculate_ai_relevance(
-                            title=title,
-                            summary=summary,
-                        )
-                    )
-
-                    # -------------------------------------------------
-                    # Create database Story object
-                    # -------------------------------------------------
-
-                    story = Story(
-                        title=title.strip(),  # Clean article title
-                        url=url.strip(),  # Clean article URL
-                        source_name=source["name"],  # Source name
-                        source_type=source["source_type"],  # RSS
-                        published_at=published_at,  # Original publication time
-                        author=author,  # Article author if available
-                        external_id=external_id,  # Source-provided ID
-                        raw_summary=summary,  # Original RSS summary
-                        collected_at=datetime.now(timezone.utc),  # Collection time
-                        status="collected",  # Initial pipeline status
-
-                        # AI relevance classification
-                        ai_relevance=ai_relevance,
-
-                        # Relevance score generated by our deterministic filter
-                        ai_relevance_score=ai_score,
-
-                        # Explanation for why the filter classified it this way
-                        filter_reason=filter_reason,
-                    )
-
-                    # Commit each story individually (not the whole
-                    # source's batch at once) so a uq_stories_url
-                    # collision only drops this one row. Two concurrent
-                    # ingestion runs (or, since the Daily News Cycle's
-                    # Celery Beat schedule, the RSS and Hacker News
-                    # tasks firing at the same scheduled time) can both
-                    # pass the `existing_story` check above for the
-                    # same URL before either commits -- a real,
-                    # previously-documented race, not just theoretical.
-                    # A single shared commit-at-the-end would let that
-                    # collision roll back every other valid insert
-                    # already queued for this source in the same batch.
-                    db.add(story)
-
-                    try:
-                        db.commit()
-                        articles_inserted += 1
-                        source_inserted += 1
-                    except IntegrityError:
-                        db.rollback()
-                        duplicates += 1
-                        source_duplicates += 1
-                        print(
-                            f"[{source['name']}] Skipped (inserted concurrently "
-                            f"by another run): {url}"
-                        )
-
-                per_source_stats[source["name"]] = {
-                    "seen": source_seen,
-                    "inserted": source_inserted,
-                    "duplicates": source_duplicates,
-                    "invalid": source_invalid,
-                    "outside_window": source_outside_window,
-                }
-
-            except Exception as exc:
-
-                # Roll back failed database transaction
-                db.rollback()
-
-                failed_sources += 1  # Record source failure
-
-                per_source_stats[source["name"]] = {"error": str(exc)}
-
-                print(
-                    f"Failed to process "
-                    f"{source['name']}: {exc}"
+                item = NewsItem(
+                    title=title.strip(),
+                    canonical_url=canonical_url,
+                    source_name=source["name"],
+                    source_type=source["source_type"],
+                    published_at=published_at,
+                    author=author,
+                    external_id=external_id,
+                    raw_summary=summary,
+                    collected_at=datetime.now(timezone.utc),
+                    collection_date=target_date,
+                    status="collected",
                 )
 
-    # ---------------------------------------------------------
-    # Print a clear per-source breakdown so it's obvious at a glance
-    # which sources are actually contributing stories.
-    # ---------------------------------------------------------
+                # Commit each item individually, not the whole source's
+                # batch at once -- a concurrent collection run touching
+                # the same item would otherwise crash this bare commit
+                # and lose every item queued so far in this source, not
+                # just the colliding one.
+                db.add(item)
 
-    print("---- Per-source ingestion breakdown ----")
+                try:
+                    db.commit()
+                    items_inserted += 1
+                    source_inserted += 1
+                except IntegrityError:
+                    db.rollback()
+                    items_updated += 1
+                    source_updated += 1
+                    print(f"[{source['name']}] Inserted concurrently by another run, treated as update: {url}")
+
+            per_source_stats[source["name"]] = {
+                "seen": source_seen,
+                "inserted": source_inserted,
+                "updated": source_updated,
+                "invalid": source_invalid,
+                "outside_window": source_outside_window,
+            }
+
+        except Exception as exc:
+            db.rollback()
+            failed_sources += 1
+            per_source_stats[source["name"]] = {"error": str(exc)}
+            print(f"Failed to process {source['name']}: {exc}")
+
+    print("---- Per-source RSS collection breakdown ----")
     for name, stats in per_source_stats.items():
         print(f"  {name}: {stats}")
     print("-----------------------------------------")
 
-    # ---------------------------------------------------------
-    # Chain into deduplication.
-    #
-    # Fire-and-forget: we queue the dedup task rather than running it
-    # inline, so a slow/failed dedup pass doesn't block ingestion from
-    # returning its own result. This matches the ephemeral-compute
-    # principle from the architecture -- ingestion and dedup are
-    # separate jobs, not one long-running process.
-    # ---------------------------------------------------------
-
-    dedup_task = deduplicate_new_stories.delay()
-
-    print(f"[ingestion] Queued dedup task {dedup_task.id}")
-
-    # ---------------------------------------------------------
-    # Return ingestion statistics
-    # ---------------------------------------------------------
-
     return {
         "sources_processed": sources_processed,
-        "articles_seen": articles_seen,
-        "articles_inserted": articles_inserted,
-        "duplicates": duplicates,
+        "items_seen": items_seen,
+        "items_inserted": items_inserted,
+        "items_updated": items_updated,
         "outside_window": outside_window,
         "invalid": invalid,
         "failed_sources": failed_sources,
         "per_source": per_source_stats,
-        "dedup_task_id": dedup_task.id,
+        "collection_date": target_date.isoformat(),
+        "coverage_start": coverage_start.isoformat(),
+        "coverage_end": coverage_end.isoformat(),
     }

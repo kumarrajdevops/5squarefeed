@@ -1794,6 +1794,200 @@ auto-blocking).
       accepted not-unit-tested-directly pattern as the rest of that
       task; covered by this live verification instead).
 
+### This session — 2026-09-22, part 39 (episode idempotency: one Episode per run_date)
+
+- [x] User reported duplicate Episode records sharing the same
+      `run_date` on the dashboard (e.g. four separate rows for
+      `2026-09-21`). Investigated before changing anything: root cause
+      was a **deliberate MVP-era decision**, documented verbatim in the
+      original `add_episodes` migration -- `run_ranking_selection()`
+      always inserted a new `Episode` with no existing-row check at
+      all, by design, so heavy dev/test traffic (repeated manual
+      `/episodes/select` calls, this session's own verification passes)
+      produced 13 stray duplicate rows across 5 dates. Confirmed via
+      direct DB inspection this was 100% real duplicate rows, not a
+      dashboard rendering bug (`GET /episodes` has no filtering at
+      all).
+- [x] Added `uq_episodes_run_date` (migration `b3e7f0a1c9d5`) enforcing
+      **at most one Episode per run_date** at the DB layer, plus
+      explicit application-level idempotency in
+      `app/tasks/ranking.py`: an existing draft is reused as-is
+      (no new row, `EpisodeStory` untouched); existing
+      rejected/approved/published are blocked outright, never silently
+      resurrected/invalidated/overwritten. `POST /api/v1/episodes/select`
+      (`app/main.py`) does a synchronous pre-check so a blocked/reused
+      call never even queues a Celery task; the real, race-safe
+      protection lives in the task itself
+      (`_create_episode_or_recover`), which catches the
+      `IntegrityError` a losing concurrent request's `INSERT` produces
+      and returns the winner's episode instead of crashing.
+- [x] New explicit `POST /api/v1/episodes/{episode_id}/reprocess`
+      endpoint + `reprocess_episode` task -- the only sanctioned way to
+      redo a draft/rejected episode's story selection (replaces its
+      `EpisodeStory` snapshot, resets `video_status`/`qa_status` to
+      `pending`, stamps `content_changed_at` reusing the existing
+      reorder/swap staleness mechanism). Deliberately a separate,
+      auditable operation, not a `force=true` flag -- approved/
+      published episodes are always blocked, no override.
+- [x] **Existing-data cleanup, performed live before adding the
+      constraint** (a unique constraint can't be added while duplicates
+      exist): verified every DELETE-candidate episode's publish/video
+      status and checked for orphaned media first (`episode_19.mp4` +
+      intro/outro *will* be orphaned on disk by deleting episode #19's
+      row -- files deliberately left alone, out of scope; DB rows only).
+      Also found and fixed a real FK issue mid-cleanup: 3
+      `Notification` rows referenced 3 of the delete-candidate episodes
+      -- nulled their `episode_id` (the column is nullable exactly for
+      this) rather than deleting the audit records. Deleted exactly 13
+      episode ids (never a broad `WHERE run_date = ...`) inside one
+      transaction, verified zero duplicate `run_date`s and episode #9
+      (published) untouched *before* committing. Canonical episodes
+      remaining: `#5` (09-15), `#6` (09-16), `#9` (09-17, published),
+      `#10` (09-18), `#11` (09-20), `#21` (09-21).
+- [x] **Verified live end-to-end** against the real dev DB: repeated
+      `/episodes/select` calls for an existing draft date return the
+      same episode, no new row, no queued task; calling it for the
+      published date (`2026-09-17`) returns 409 immediately; reprocess
+      on the real draft episode #11 replaced its selection in place
+      (18 → 30 `EpisodeStory` rows, same episode id, `video_status`/
+      `qa_status` reset to `pending`) and reprocessing episode #9
+      (published) is blocked the same way select is. Full `pytest`
+      suite: 162 tests, all passing (29 new -- `tests/test_episode_idempotency.py`).
+
+### This session — 2026-09-22, part 40 (real ingestion window on the DEV Collect panel; removed a wrong episode-page field)
+
+- [x] Added `Collected: <min> → <max> (N hrs)` to the episode details
+      page, computed from selected stories' `collected_at`. User caught
+      this was wrong: it measured when the 2 *winning* stories for that
+      episode happened to be inserted (which can span many separate
+      ingestion runs, even days apart, since an episode's selection
+      draws from the whole accumulated story pool) -- not the 22h
+      `news_window_hours` ingestion filter the user actually wanted to
+      see. Removed the field entirely (`computeCollectionWindow` and
+      its usage in `renderStudioLayout`, `app/dashboard/app.js`).
+- [x] Investigated before rebuilding: `news_window_hours` (22) is a
+      transient filter -- `ingest_news()` (`app/tasks/ingestion.py`)
+      computes `window_start = now - 22h` at its own execution time and
+      discards it once used; `fetch_ai_stories()`
+      (`app/sources/hackernews_api.py`) computed an independent
+      `time.time()`-based window the same way. Neither value was ever
+      returned or stored anywhere -- confirmed no existing mechanism
+      (Celery `task_track_started`, `AsyncResult` usage) already
+      exposed a task's real execution time.
+- [x] Made both ingestion tasks capture and return their own window:
+      `ingest_news()` now includes `window_start`/`window_end`/
+      `configured_window_hours` in its result (already computed `now`
+      internally, just wasn't exposing it). `fetch_ai_stories()`'s
+      signature changed to take `now` explicitly instead of an internal
+      `time.time()` call, so `ingest_hackernews_stories()` captures one
+      shared reference instant and returns the same three fields --
+      same filter math, no behavior change, no new dependency.
+- [x] New minimal `GET /api/v1/tasks/{task_id}/result` (`app/main.py`)
+      wrapping Celery's already-configured Redis result backend
+      (`AsyncResult`) -- reads back a finished task's own result dict.
+      Deliberately generic (works for any task id) but narrow in scope:
+      no new persistent storage, no task-tracking config changes.
+- [x] The DEV "Collect New Stories" panel now polls this endpoint (via
+      its existing ~2s poll loop -- no second timer/loop introduced)
+      and shows the real per-source window once each task finishes,
+      e.g. `RSS: Sep 20, 7:12 PM → Sep 21, 5:12 PM (22h configured) ·
+      inserted 4`, task id kept as small secondary text. Falls back to
+      "queued" text if a task hasn't finished by the time the story-
+      detection poll concludes.
+- [x] **Verified live**: triggered real RSS + HN ingestion via curl,
+      confirmed `GET /api/v1/tasks/{id}/result` returns real captured
+      `window_start`/`window_end` (`2026-09-20T19:12:24Z` →
+      `2026-09-21T17:12:24Z`, `configured_window_hours: 22`) matching
+      the task's actual execution time, not the request time. Confirmed
+      in-browser: the panel correctly rendered both sources' real
+      windows + inserted counts (0, since this dev DB's story pool is
+      already exhausted from this session's heavy testing) without
+      claiming new stories were found. Confirmed the removed episode-
+      page field no longer appears. Full `pytest` suite: 167 tests, all
+      passing (5 new -- `tests/test_hackernews_api.py` +
+      `tests/test_ingestion_endpoints.py` additions).
+
+### This session — 2026-09-22, part 41 (calendar-day model + raw/editorial schema split -- clean break)
+
+- [x] Replaced the rolling 22h ingestion window entirely with a strict
+      calendar-day model: `target_date = today_ist() - 1 day`. New
+      single authoritative date module `app/dates.py`
+      (`today_ist`/`target_collection_date`/`coverage_window`/
+      `episode_key`) -- every ingestion/processing/API date decision
+      now imports from here, no `datetime.now()` used directly for a
+      business-date decision anywhere else (verified via grep).
+- [x] Split one Postgres database into two schemas: `raw` (pure
+      collection, zero editorial judgment) and `editorial` (dedup/
+      verification/taxonomy/ranking/episodes/production/QA/publishing).
+      `app/models.py` rewritten from scratch: old single `Story` table
+      replaced by `raw.NewsItem` (dual identity --
+      `(source_name, canonical_url)` always unique, plus
+      `(source_name, external_id)`) + `raw.CollectionRun` (one row per
+      complete "Collect News" operation, RSS+HN counts together, per
+      explicit user clarification) + `editorial.StoryState` (1:1
+      shared-PK companion to NewsItem, created only by processing,
+      never by collection) + `Episode.run_date` renamed
+      `episode_date` (`episode_key` computed on demand, not stored).
+      Clean-break Alembic migration (`a3f6c92e1d47`): old
+      `public.stories/episodes/episode_stories/story_content/
+      notifications` dropped outright (confirmed empty), new schemas
+      created fresh -- deliberately one-way, no downgrade path.
+- [x] Collection and processing are now two fully separate operations,
+      per explicit user requirement: `ingest_news`/
+      `ingest_hackernews_stories` (`app/tasks/ingestion*.py`) are plain
+      functions writing ONLY `raw.news_items`, no `.delay()` auto-chain
+      into anything editorial. New `app/tasks/collection.py`
+      (`run_collection`, the only Celery task) runs both sources in
+      one shared session and writes exactly one `CollectionRun` row.
+      RSS keeps its existing single-live-fetch mechanism (historical
+      backfill explicitly deferred, not solved here) -- only the
+      filter boundary changed to calendar-day. Hacker News's
+      `fetch_ai_stories_for_range` (built earlier this session) is now
+      the only HN fetch path; the old rolling `fetch_ai_stories()` is
+      deleted outright.
+- [x] Converted the old `.delay()` auto-chain
+      (dedup -> content_dedup -> verification) into direct sequential
+      function calls, each keeping its own commit boundary/retry/
+      idempotency behavior unchanged, per explicit user requirement.
+      New `app/tasks/classify.py` (`classify_new_raw_items` -- the
+      "create StoryState + compute ai_relevance" step, moved out of
+      ingestion since raw collection must never compute anything
+      editorial) and new orchestrator
+      `app/tasks/scheduled.py::run_daily_processing` calling
+      classify -> dedup -> content_dedup -> verification ->
+      rank/select -> produce -> QA as one sequence, sharing one DB
+      session (each stage still commits its own work independently).
+      `app/tasks/ranking.py` rewritten to join `raw.NewsItem` +
+      `editorial.StoryState` (scoped by `NewsItem.collection_date`,
+      replacing the old `published_at` coverage-window filter
+      entirely) and use `episode_date` throughout.
+- [x] Updated every remaining consumer of the deleted `Story` model
+      that the plan's own file list initially missed -- flagged, not
+      silently expanded: `app/tasks/content.py`, `episode_video.py`,
+      `episode_qa.py` (+ `app/qa/video_qa.py`), `publishing.py`, and
+      `app/main.py`'s API layer (new `POST /api/v1/collection/run` +
+      `GET /api/v1/raw/collection-runs` replacing the old two-endpoint
+      ingestion trigger; `/episodes/select` is now the processing
+      trigger). Deleted four now-obsolete one-time backfill scripts
+      that imported the deleted model against already-wiped data
+      (`app/scripts/backfill_*.py`). Dashboard's Collect panel
+      rewritten around the single combined task's real result
+      (no more per-source "22h configured" wording).
+- [x] **Verified live**: real collection run for 2026-09-20 (11 RSS
+      sources + Hacker News) -> 24 raw items, one `CollectionRun` row,
+      zero `editorial.stories` rows immediately after (collection
+      really writes nothing editorial). Triggered processing for the
+      same date -> classify (24 seen, 17 ai_candidate) -> dedup ->
+      content-dedup -> verification -> ranking created episode #1 (17
+      primary, 0 backup -- real ceiling given source limits that day)
+      -> video produced (0 failures) -> QA ran (failed only on the
+      expected `story_count` 17/25 check). Confirmed via
+      `GET /api/v1/episodes/1` that `episode_date`/`episode_key`,
+      taxonomy labels, and verification status all serialize
+      correctly end to end. Full `pytest` suite: 175 passing (3
+      existing files fixed for the model rename, 2 new files added --
+      `test_raw_ingestion.py`, `test_processing_flow.py`).
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports

@@ -130,20 +130,31 @@ OpenAPI docs: http://localhost:8000/docs
 
 ## Scheduled Daily News Cycle
 
-The full cycle (three overnight collection passes, then a cutoff that
-ranks/produces/QAs the episode) is built and verified, via a `celery
-beat` process:
+Collection targets a strict calendar-day model, not a rolling window:
+`target_date = today's IST calendar date - 1 day` (`app/dates.py`'s
+`target_collection_date()`). The full cycle (three overnight
+collection passes, then a processing pass) is built and verified, via
+a `celery beat` process:
 
 | Time (IST) | What runs |
 |---|---|
-| 10:00 PM | Collect (RSS + Hacker News) |
-| 1:00 AM | Collect again |
+| 10:00 PM | Collect (RSS + Hacker News) into `raw.news_items` -- no editorial judgment yet |
+| 1:00 AM | Collect again (same `target_date`, repeatable/idempotent) |
 | 3:30 AM | Final collection |
-| 4:00 AM | **Cutoff**: rank + select Top 25 + 5 backups -> produce the episode video -> run QA |
+| 4:00 AM | **Process**: classify -> dedup -> content-dedup -> verification -> rank/select Top 25 + 5 backups -> produce the episode video -> run QA |
+
+Collection and processing are deliberately separate operations --
+collecting never creates anything editorial by itself; processing is
+the one place `raw.news_items` turns into an `editorial.episodes` row.
+**Not solved by this design**: IST midnight falls between the 10 PM and
+1 AM passes, so on any given real calendar day they don't both compute
+the same `target_date` (see `app/worker/celery_app.py`'s beat_schedule
+comment for the exact consequence) -- a production scheduler redesign,
+deferred intentionally.
 
 Human approval (the step before the 6 AM IST publish target) is still a
-manual dashboard action -- the scheduled cutoff stops once the episode
-is produced and QA'd, ready for review.
+manual dashboard action -- the scheduled processing pass stops once the
+episode is produced and QA'd, ready for review.
 
 **Not started by default** -- real scheduling is a production concern,
 not something that should fire unprompted during dev/testing just
@@ -169,82 +180,104 @@ Everything below (manual ingest/produce/QA endpoints) still works the
 same way and is useful for testing, backfilling, or triggering a step
 out of cycle.
 
-### Dev usage: "Collect New Stories" dashboard button
+### Dev usage: "Collect New Stories" / "Process Episode" dashboard buttons
 
-The Episodes list page shows a **Collect New Stories** button, but
-only when `APP_ENV` is `local` or `dev` (`.env`'s `APP_ENV`, exposed
-via `GET /health`'s `app_env` field). Clicking it calls the same two
-manual endpoints below (`POST /api/v1/ingestion/rss` and
-`POST /api/v1/ingestion/hackernews`), which enqueue the exact same
-`ingest_news`/`ingest_hackernews_stories` Celery tasks the production
-schedule already uses -- nothing is duplicated. It:
+The Episodes list page shows two buttons, but only when `APP_ENV` is
+`local` or `dev` (`.env`'s `APP_ENV`, exposed via `GET /health`'s
+`app_env` field):
+
+**Collect New Stories** calls `POST /api/v1/collection/run`, which
+queues the single `run_collection` task (RSS + Hacker News together,
+same as the scheduled cycle) for `target_collection_date()` (today IST
+- 1 day). It:
 
 - Stores whatever's currently available from RSS + Hacker News into
-  the dev Postgres database, so you don't have to wait for the
-  scheduled IST times to get stories to test with.
-- Does **not** rank, produce, QA, or publish anything -- it only runs
-  collection.
-- Is a compact operational control, not a story browser -- it shows a
-  spinner + elapsed timer, per-source `✓`/`✕` status, and once queued
-  polls `GET /api/v1/stories` (unmodified) every ~2s for up to ~20s to
-  report a count once new stories become available (e.g. "3 new
-  stories available -- RSS 2 · Hacker News 1"), or "Collection is
-  still processing" if the window elapses first -- never "completed,"
-  since there's no infrastructure in place to confirm the Celery tasks
-  have actually finished running. The success summary auto-collapses
-  back to the plain button after a few seconds; failures stay visible
-  until you try again. No headlines/story list are shown on this page
-  -- `GET /api/v1/stories` remains available for a future dedicated
-  Stories/Inbox page.
+  `raw.news_items`, so you don't have to wait for the scheduled IST
+  times to get stories to test with.
+- Writes **only** raw data -- no `ai_relevance`, no dedup, no ranking,
+  nothing editorial. Never auto-chains into processing.
+- Shows a spinner + elapsed timer, then polls
+  `GET /api/v1/tasks/{task_id}/result` for the real result once the
+  task finishes: real per-source `seen`/`inserted`/`updated` counts and
+  the actual `target_date` collected for -- not just "queued". The
+  result also durably lands in `raw.collection_runs`, readable anytime
+  via `GET /api/v1/raw/collection-runs?collection_date=YYYY-MM-DD`
+  (useful after the button's own poll window has passed).
 
-**In production** (`APP_ENV=prod`), both endpoints reject manual
-requests with `403 Forbidden` ("Manual ingestion is only available in
-local/dev environments"), whether or not the button is visible --
-production collection only ever happens via the scheduled Celery Beat
-cycle above, which calls the same task functions directly and is
-completely unaffected by this restriction.
+**Process Episode** calls `POST /api/v1/episodes/select` with no date
+(so it targets the same `target_collection_date()` Collect just used),
+which is the processing trigger described under "Running the pipeline"
+below -- classify -> dedup -> content-dedup -> verification ->
+rank/select -> produce -> QA, all as one task. This can take several
+minutes (real video production, not just data processing) -- the
+button polls for up to 10 minutes and shows a summary of every stage's
+result once finished, then refreshes the episode list.
+
+These are two deliberately separate clicks, in order -- Process is
+never auto-run after Collect (see `app/tasks/collection.py`'s
+docstring for why collection and processing are kept as distinct
+operations).
+
+**In production** (`APP_ENV=prod`), `POST /api/v1/collection/run`
+rejects manual requests with `403 Forbidden` ("Manual ingestion is
+only available in local/dev environments"), whether or not the button
+is visible -- production collection only ever happens via the
+scheduled Celery Beat cycle above, which calls the same task function
+directly and is completely unaffected by this restriction.
 
 ## Running the pipeline
 
-**1. Ingest news** (pulls from all enabled RSS sources, filters for
-AI relevance, then automatically chains into deduplication):
+**1. Collect news** (RSS from all enabled sources + Hacker News,
+together, as one operation -- writes only `raw.news_items` +
+`raw.collection_runs`, nothing editorial, never auto-chains into
+processing):
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/ingestion/rss
+curl -X POST http://localhost:8000/api/v1/collection/run
 ```
 
-**2. (Optional) Also ingest Hacker News** (AI-related stories above a
-points threshold, official Algolia API, chains into the same
-deduplication step):
+Optionally pass `?target_date=YYYY-MM-DD` (DEV-only) to collect for an
+explicit day instead of the default `target_collection_date()` (today
+IST - 1 day). Check what a past run actually did any time via:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/ingestion/hackernews
+curl "http://localhost:8000/api/v1/raw/collection-runs?collection_date=YYYY-MM-DD"
 ```
 
-**3. (Optional) Re-run deduplication manually**, without a full
-ingestion cycle (auto-chains into Fact Extraction + Verification, same
-as after a real ingestion run):
-
-```bash
-curl -X POST http://localhost:8000/api/v1/dedup/run
-```
-
-**3b. (Optional) Re-run Fact Extraction + Verification manually**,
-without a full dedup pass -- e.g. after backfilling data. Soft signal
-only, safe to re-run (only processes stories still at `verification_status: "pending"`):
-
-```bash
-curl -X POST http://localhost:8000/api/v1/verification/run
-```
-
-**4. Rank + select the Top 25 + 5 backups.** This is intentionally
-a separate, manually-triggered step (not auto-chained after
-ingestion) -- it's meant to run once, after the daily collection
-window closes, not after every ingestion pass:
+**2. Process the episode.** Reads `raw.news_items` for the target date
+and runs classify -> title-dedup -> content-dedup/historical-repeat
+detection -> Fact Extraction + Verification -> rank/select the Top 25
++ 5 backups -> produce the episode video -> run Automated QA, all as
+one task (`app/tasks/scheduled.py`'s `run_daily_processing`). This is
+intentionally a separate, manually-triggered step from Collection --
+it's meant to run once, after the daily collection window closes, not
+after every collection pass:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/episodes/select
 ```
+
+**Idempotent per `episode_date`** -- `editorial.episodes.episode_date`
+has a `uq_editorial_episodes_episode_date` unique constraint, and this
+endpoint checks for an existing episode before queuing anything: no
+existing episode creates one as before (200, `{"task_id": ...,
+"status": "queued"}`); an existing **draft** is reused as-is,
+unchanged, with no new task queued (200, `{"created": false, "reason":
+"existing_draft_reused"}`); an existing **rejected**, **approved**, or
+**published** episode is blocked outright (409) -- normal selection
+can never resurrect a rejection, invalidate an approval, or touch
+anything already live. To deliberately redo a draft/rejected episode's
+selection, use the explicit reprocess endpoint instead of calling
+`/select` again:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/reprocess
+```
+
+Reprocess replaces that episode's story selection in place (never
+creates a second episode) and resets its `video_status`/`qa_status`
+back to `pending`. It's blocked the same way for approved/published
+episodes -- there is no override.
 
 ## Producing content (script + voice + visual + video)
 
@@ -658,7 +691,7 @@ docker exec 5squarefeed-api-1 pip install -r requirements-dev.txt
 docker exec -w /app 5squarefeed-api-1 pytest
 ```
 
-109 tests, no running Postgres required -- DB-backed tests use an
+175 tests, no running Postgres required -- DB-backed tests use an
 in-memory SQLite database (`tests/conftest.py`'s `db_session` fixture;
 every model uses portable column types, so this is a faithful stand-in)
 rather than the real dev database. Covers the deterministic filters

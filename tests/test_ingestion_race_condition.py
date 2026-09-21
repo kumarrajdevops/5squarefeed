@@ -1,50 +1,53 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
-from app.models import Story
+from app.models import NewsItem
 
 
-def _insert_story(db, url, title="Some story"):
-    story = Story(
+COLLECTION_DATE = date(2026, 9, 22)
+
+
+def _insert_item(db, url, title="Some story", source_name="Example Source"):
+    item = NewsItem(
         title=title,
-        url=url,
-        source_name="Example Source",
+        canonical_url=url,
+        source_name=source_name,
         source_type="rss",
         published_at=datetime.now(timezone.utc),
         collected_at=datetime.now(timezone.utc),
+        collection_date=COLLECTION_DATE,
         status="collected",
-        ai_relevance="ai_candidate",
     )
-    db.add(story)
+    db.add(item)
     db.commit()
-    return story
+    return item
 
 
 def test_duplicate_url_raises_integrity_error_not_silent_corruption(db_session):
     """
     Sanity check that the underlying constraint this fix relies on
     actually fires under the test database too (SQLite, like Postgres,
-    raises IntegrityError on a uq_stories_url violation via SQLAlchemy's
-    backend-agnostic exception).
+    raises IntegrityError on a uq_news_items_source_url violation via
+    SQLAlchemy's backend-agnostic exception).
     """
-    _insert_story(db_session, url="https://example.com/story")
+    _insert_item(db_session, url="https://example.com/story")
 
-    duplicate = Story(
+    duplicate = NewsItem(
         title="Different title, same url",
-        url="https://example.com/story",
-        source_name="Another Source",
+        canonical_url="https://example.com/story",
+        source_name="Example Source",  # same source_name -- same identity
         source_type="hackernews",
         published_at=datetime.now(timezone.utc),
         collected_at=datetime.now(timezone.utc),
+        collection_date=COLLECTION_DATE,
         status="collected",
-        ai_relevance="ai_candidate",
     )
     db_session.add(duplicate)
 
     try:
         db_session.commit()
-        assert False, "expected an IntegrityError on the duplicate URL"
+        assert False, "expected an IntegrityError on the duplicate (source_name, canonical_url)"
     except IntegrityError:
         db_session.rollback()
 
@@ -53,15 +56,15 @@ def test_per_row_commit_pattern_isolates_a_collision_from_other_inserts(db_sessi
     """
     Direct regression for this session's ingestion race-condition fix
     (app/tasks/ingestion.py, app/tasks/ingestion_hackernews.py): a
-    uq_stories_url collision on one entry must not roll back other
-    valid inserts already committed in the same run -- reproduces the
-    exact per-row commit + narrow except IntegrityError pattern those
-    tasks now use, rather than the old single commit-at-the-end-of-
-    the-batch approach that would have lost everything.
+    uq_news_items_source_url collision on one entry must not roll back
+    other valid inserts already committed in the same run -- reproduces
+    the exact per-row commit + narrow except IntegrityError pattern
+    those tasks now use, rather than a single commit-at-the-end-of-the-
+    batch approach that would have lost everything.
     """
-    # A story that already exists (simulating another run having just
-    # inserted it moments before this one's existing_story check ran).
-    _insert_story(db_session, url="https://example.com/already-inserted")
+    # An item that already exists (simulating another run having just
+    # inserted it moments before this one's existing-item check ran).
+    _insert_item(db_session, url="https://example.com/already-inserted")
 
     incoming_urls = [
         "https://example.com/new-story-1",
@@ -73,17 +76,17 @@ def test_per_row_commit_pattern_isolates_a_collision_from_other_inserts(db_sessi
     duplicates = 0
 
     for url in incoming_urls:
-        story = Story(
+        item = NewsItem(
             title=f"Story for {url}",
-            url=url,
+            canonical_url=url,
             source_name="Example Source",
             source_type="rss",
             published_at=datetime.now(timezone.utc),
             collected_at=datetime.now(timezone.utc),
+            collection_date=COLLECTION_DATE,
             status="collected",
-            ai_relevance="ai_candidate",
         )
-        db_session.add(story)
+        db_session.add(item)
 
         try:
             db_session.commit()
@@ -95,7 +98,7 @@ def test_per_row_commit_pattern_isolates_a_collision_from_other_inserts(db_sessi
     assert inserted == 2
     assert duplicates == 1
 
-    all_urls = {s.url for s in db_session.query(Story).all()}
+    all_urls = {i.canonical_url for i in db_session.query(NewsItem).all()}
     assert all_urls == {
         "https://example.com/already-inserted",
         "https://example.com/new-story-1",

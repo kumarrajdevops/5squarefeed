@@ -20,9 +20,17 @@ def db_session():
     Postgres required to run `pytest`). SQLAlchemy raises the same
     IntegrityError on a unique-constraint violation regardless of
     backend, which is what the ingestion race-condition test relies on.
+
+    schema_translate_map maps the real `raw`/`editorial` Postgres
+    schemas (app/models.py's __table_args__) to no schema at all for
+    this SQLite engine -- SQLite has no real multi-schema support the
+    way Postgres does. This is test-only: real Postgres always uses
+    the actual `raw`/`editorial` schema names untouched; nothing about
+    the production schema is weakened to make SQLite tests easier.
     """
 
     engine = create_engine("sqlite:///:memory:")
+    engine = engine.execution_options(schema_translate_map={"raw": None, "editorial": None})
     Base.metadata.create_all(engine)
 
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

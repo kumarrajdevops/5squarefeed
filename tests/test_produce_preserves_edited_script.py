@@ -1,23 +1,23 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from app.models import Story, StoryContent
+from app.models import NewsItem, StoryContent
 from app.tasks import episode_video
 
 
 def _make_story(db, **overrides):
     defaults = dict(
         title="Original RSS Headline",
-        url="https://example.com/story",
+        canonical_url="https://example.com/story",
         source_name="Example Source",
         source_type="rss",
         published_at=datetime.now(timezone.utc),
         collected_at=datetime.now(timezone.utc),
+        collection_date=date(2026, 9, 22),
         status="collected",
-        ai_relevance="ai_candidate",
         raw_summary="The original RSS summary text.",
     )
     defaults.update(overrides)
-    story = Story(**defaults)
+    story = NewsItem(**defaults)
     db.add(story)
     db.flush()
     return story

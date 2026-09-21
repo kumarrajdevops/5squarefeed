@@ -6,7 +6,7 @@ from app.content.video_composer import build_captions, compose_video, get_audio_
 from app.content.visual_generator import generate_card
 from app.content.voice_generator import synthesize_voice
 from app.db import SessionLocal
-from app.models import Story, StoryContent
+from app.models import NewsItem, StoryContent
 from app.worker.celery_app import celery_app
 
 
@@ -60,9 +60,9 @@ def generate_script_task(story_id: int) -> dict:
     """
 
     with SessionLocal() as db:
-        story = db.get(Story, story_id)
+        item = db.get(NewsItem, story_id)
 
-        if story is None:
+        if item is None:
             return {"story_id": story_id, "status": "failed", "error": "Story not found"}
 
         content = get_or_create_content(db, story_id)
@@ -70,8 +70,8 @@ def generate_script_task(story_id: int) -> dict:
         if not content.script_text:
             try:
                 script = generate_script(
-                    title=story.title,
-                    raw_summary=story.raw_summary,
+                    title=item.title,
+                    raw_summary=item.raw_summary,
                 )
 
                 content.headline = script["headline"]
@@ -141,14 +141,14 @@ def generate_visual_task(story_id: int) -> dict:
             .filter(StoryContent.story_id == story_id)
             .first()
         )
-        story = db.get(Story, story_id)
+        item = db.get(NewsItem, story_id)
 
-        if content is None or story is None:
+        if content is None or item is None:
             return {"story_id": story_id, "status": "failed", "error": "No content/story found"}
 
         try:
             image_path = MEDIA_ROOT / "images" / f"{story_id}.png"
-            generate_card(content.headline, story.source_name, image_path)
+            generate_card(content.headline, item.source_name, image_path)
 
             content.image_path = str(image_path)
             content.status = "visual_ready"

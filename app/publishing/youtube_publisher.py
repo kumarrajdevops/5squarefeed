@@ -15,7 +15,7 @@ BRAND_NAME = "5squareFeed"
 MAX_DESCRIPTION_CHARS = 4900
 
 
-def build_video_metadata(run_date: date, stories: list[dict]) -> dict:
+def build_video_metadata(episode_date: date, stories: list[dict]) -> dict:
     """
     Build the YouTube video title/description/tags for one episode --
     a pure function (no network, no DB), same "keep the deterministic
@@ -26,11 +26,11 @@ def build_video_metadata(run_date: date, stories: list[dict]) -> dict:
     `stories` is the episode's primary (Top 25) list in rank order,
     each a {"headline", "source_name", "url"} dict -- exactly the
     shape app/tasks/publishing.py already has on hand from
-    EpisodeStory/Story, so no ORM objects need to leak into this
+    EpisodeStory/NewsItem, so no ORM objects need to leak into this
     module.
     """
 
-    formatted_date = run_date.strftime("%B %d, %Y")
+    formatted_date = episode_date.strftime("%B %d, %Y")
     title = f"{BRAND_NAME} — {formatted_date} — Today's Top {len(stories)} AI Stories"
 
     lines = [

@@ -2,24 +2,30 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from celery.result import AsyncResult
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from app.config import settings
 from app.content.video_composer import probe_video
+from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
-from app.models import Episode, EpisodeStory, Notification, Story, StoryContent
+from app.models import CollectionRun, Episode, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.tasks.collection import run_collection
 from app.tasks.content import generate_script_task
-from app.tasks.dedup import deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
 from app.tasks.episode_video import produce_episode_video
-from app.tasks.ingestion import ingest_news
-from app.tasks.ingestion_hackernews import ingest_hackernews_stories
 from app.tasks.publishing import publish_episode_to_youtube
-from app.tasks.ranking import run_ranking_selection
-from app.tasks.verification import run_fact_extraction_and_verification
+from app.tasks.ranking import (
+    REPROCESSABLE_STATUSES,
+    classify_existing_episode,
+    reprocess_episode,
+)
+from app.tasks.scheduled import run_daily_processing
+from app.worker.celery_app import celery_app
 
 
 # Object-storage-style local media root (see app/tasks/content.py).
@@ -147,77 +153,215 @@ def _reject_if_not_dev() -> None:
         )
 
 
-@app.post("/api/v1/ingestion/rss")
-def trigger_rss_ingestion():
+@app.post("/api/v1/collection/run")
+def trigger_collection(target_date: str | None = None):
+    """
+    Trigger one complete "Collect News" operation -- RSS and Hacker
+    News together, as a single app.tasks.collection.run_collection
+    task producing exactly one raw.collection_runs row (see that
+    task's docstring). Replaces the old separate
+    /api/v1/ingestion/rss and /api/v1/ingestion/hackernews endpoints,
+    which each queued an independent task -- collection is now always
+    one operation, never two.
+
+    target_date: optional "YYYY-MM-DD" override, DEV-only (same guard
+    as the rest of this function). Defaults to target_collection_date()
+    (today IST - 1 day) if omitted -- normal use never needs to pass
+    this.
+    """
     _reject_if_not_dev()
-    task = ingest_news.delay()
+
+    if target_date is not None:
+        try:
+            date.fromisoformat(target_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid target_date {target_date!r}; expected YYYY-MM-DD.",
+            )
+
+    task = run_collection.delay(target_date_iso=target_date, trigger_type="manual")
     return {"task_id": task.id, "status": "queued"}
 
 
-@app.post("/api/v1/ingestion/hackernews")
-def trigger_hackernews_ingestion():
+@app.get("/api/v1/raw/collection-runs")
+def list_collection_runs(collection_date: str | None = None, limit: int = 20):
     """
-    Pull AI-related Hacker News stories (official Algolia search API)
-    and chain into deduplication, same as RSS ingestion. Kept as a
-    separate endpoint/task from RSS so an HN API outage can't affect
-    RSS ingestion.
+    Durable status/counts for past "Collect News" operations -- the
+    authoritative answer to "what actually happened", independent of
+    any specific task_id (see app.models.CollectionRun's docstring).
+    Defaults to today's target_collection_date() when collection_date
+    is omitted.
     """
-    _reject_if_not_dev()
-    task = ingest_hackernews_stories.delay()
-    return {"task_id": task.id, "status": "queued"}
+    limit = max(1, min(limit, 100))
+
+    if collection_date is not None:
+        try:
+            parsed_date = date.fromisoformat(collection_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid collection_date {collection_date!r}; expected YYYY-MM-DD.",
+            )
+    else:
+        parsed_date = target_collection_date()
+
+    with SessionLocal() as db:
+        runs = db.scalars(
+            select(CollectionRun)
+            .where(CollectionRun.collection_date == parsed_date)
+            .order_by(CollectionRun.started_at.desc())
+            .limit(limit)
+        ).all()
+
+        return [
+            {
+                "id": run.id,
+                "collection_date": run.collection_date,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "trigger_type": run.trigger_type,
+                "status": run.status,
+                "rss_items_seen": run.rss_items_seen,
+                "rss_items_inserted": run.rss_items_inserted,
+                "rss_items_updated": run.rss_items_updated,
+                "hn_items_seen": run.hn_items_seen,
+                "hn_items_inserted": run.hn_items_inserted,
+                "hn_items_updated": run.hn_items_updated,
+                "error_count": run.error_count,
+                "error_details": run.error_details,
+            }
+            for run in runs
+        ]
 
 
-@app.post("/api/v1/dedup/run")
-def trigger_dedup():
+@app.get("/api/v1/tasks/{task_id}/result")
+def get_task_result(task_id: str):
     """
-    Manually trigger the deduplication pass. Normally this runs
-    automatically at the end of every ingestion cycle, but this
-    endpoint is useful for testing/verification, or for re-running
-    dedup without doing a full ingestion cycle first.
+    Read back a Celery task's return value once it's finished, via the
+    result backend (Redis -- already configured, see
+    app/worker/celery_app.py's `backend=`). Built specifically so the
+    DEV "Collect New Stories" dashboard panel can show the real
+    result of a run_collection task (RSS + HN counts, target_date --
+    see app/tasks/collection.py) without a separate polling mechanism.
+
+    Generic by design (works for any task id, not just ingestion), but
+    intentionally minimal: no new persistent storage, no polling
+    infrastructure beyond reading what Celery already stores. Returns
+    "pending" for a task that hasn't finished (or doesn't exist --
+    Celery can't distinguish those without eager result storage of the
+    initial PENDING state, which this app doesn't configure).
     """
-    task = deduplicate_new_stories.delay()
-    return {"task_id": task.id, "status": "queued"}
+    result = AsyncResult(task_id, app=celery_app)
+
+    if not result.ready():
+        return {"task_id": task_id, "status": "pending"}
+
+    if result.failed():
+        return {"task_id": task_id, "status": "failed", "error": str(result.result)}
+
+    return {"task_id": task_id, "status": "success", "result": result.result}
 
 
-@app.post("/api/v1/verification/run")
-def trigger_verification():
-    """
-    Manually trigger Fact Extraction + the Verification Engine.
-    Normally this runs automatically at the end of every dedup pass
-    (see app/tasks/dedup.py), but this endpoint is useful for testing,
-    backfilling, or re-running without a full ingestion cycle first.
-    Soft signal only -- see app/verification/engine.py's docstring.
-    """
-    task = run_fact_extraction_and_verification.delay()
-    return {"task_id": task.id, "status": "queued"}
+_EXISTING_EPISODE_MESSAGES = {
+    "episode_published": "This episode is already published and can never be recreated or modified by selection.",
+    "episode_approved": "This episode is already approved. Move it back to an editable state before reprocessing.",
+    "episode_rejected": "This episode was rejected. Use POST /api/v1/episodes/{episode_id}/reprocess to explicitly reprocess it.",
+}
 
 
 @app.post("/api/v1/episodes/select")
-def trigger_ranking_selection(run_date: str | None = None):
+def trigger_ranking_selection(episode_date: str | None = None):
     """
-    Trigger ranking + Top-25/5-backup selection, creating a new
-    Episode. Deliberately NOT auto-chained after ingestion/dedup --
-    per the architecture's daily cycle, this should run once, after
-    the collection cutoff, not after every ingestion pass.
+    Trigger processing (classify -> dedup -> content-dedup ->
+    verification -> rank/select -> produce -> QA -- see
+    app/tasks/scheduled.py's run_daily_processing) for episode_date.
+    Idempotent per episode_date -- at most one Episode may ever exist
+    per episode_date (uq_editorial_episodes_episode_date), and this
+    endpoint performs a synchronous pre-check so a call that's already
+    known to be a no-op never even queues the (expensive) processing
+    task:
 
-    run_date: optional "YYYY-MM-DD" override, mainly for testing.
-    Defaults to today (UTC date) if omitted.
+    - No existing episode -> queues run_daily_processing as before.
+    - Existing draft -> 200, returns that episode's id, queues nothing.
+    - Existing rejected/approved/published -> 409, queues nothing.
+    - More than one existing episode for this episode_date (only
+      possible for historical data predating
+      uq_editorial_episodes_episode_date) -> 409, every candidate id
+      listed, never guessed at.
+
+    This check is a fast-feedback convenience, not the sole guard --
+    the real, race-safe protection lives inside ranking's own
+    selection step (app/tasks/ranking.py), backed by
+    uq_editorial_episodes_episode_date. Two near-simultaneous calls
+    can both pass this endpoint's check before either task actually
+    inserts; that constraint plus the task's own IntegrityError
+    handling is what closes that gap.
+
+    episode_date: optional "YYYY-MM-DD" override, mainly for testing.
+    Defaults to target_collection_date() (today IST - 1 day) if
+    omitted -- collection and processing always target the same
+    calendar day by default.
 
     Validated here rather than left to the Celery task: the task runs
     out-of-process, so an invalid value would otherwise fail silently
     from the caller's perspective (HTTP 200 + queued task_id, with the
     actual ValueError only visible in the worker logs).
     """
-    if run_date is not None:
+    if episode_date is not None:
         try:
-            date.fromisoformat(run_date)
+            parsed_episode_date = date.fromisoformat(episode_date)
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail=f"Invalid run_date {run_date!r}; expected YYYY-MM-DD.",
+                detail=f"Invalid episode_date {episode_date!r}; expected YYYY-MM-DD.",
             )
+    else:
+        parsed_episode_date = target_collection_date()
 
-    task = run_ranking_selection.delay(run_date)
+    with SessionLocal() as db:
+        existing_episodes = (
+            db.query(Episode).filter(Episode.episode_date == parsed_episode_date).all()
+        )
+
+    if len(existing_episodes) > 1:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "episode_date": parsed_episode_date.isoformat(),
+                "error": "multiple_existing_episodes",
+                "detail": (
+                    "Multiple episodes already exist for this episode_date "
+                    "(predates uq_editorial_episodes_episode_date) -- "
+                    "refusing to guess which one is canonical."
+                ),
+                "candidate_episode_ids": [e.id for e in existing_episodes],
+            },
+        )
+
+    if existing_episodes:
+        existing = existing_episodes[0]
+        reason = classify_existing_episode(existing)
+
+        if reason == "existing_draft_reused":
+            return {
+                "episode_id": existing.id,
+                "episode_date": parsed_episode_date.isoformat(),
+                "created": False,
+                "reason": reason,
+            }
+
+        return JSONResponse(
+            status_code=409,
+            content={
+                "episode_id": existing.id,
+                "episode_date": parsed_episode_date.isoformat(),
+                "error": reason,
+                "detail": _EXISTING_EPISODE_MESSAGES[reason],
+            },
+        )
+
+    task = run_daily_processing.delay(parsed_episode_date.isoformat())
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -433,6 +577,53 @@ def reject_episode(episode_id: int):
     return {"episode_id": episode_id, "status": "rejected"}
 
 
+@app.post("/api/v1/episodes/{episode_id}/reprocess")
+def reprocess_episode_endpoint(episode_id: int):
+    """
+    Explicit, auditable redo of selection for an existing episode --
+    the only sanctioned way to change a draft/rejected episode's story
+    selection. Deliberately a separate, clearly-named operation rather
+    than a force=true flag on /episodes/select: normal selection must
+    stay safe to call repeatedly (see that endpoint's docstring);
+    reprocessing is a distinct, intentional action operating on a
+    specific episode_id, never on an episode_date.
+
+    Allowed only when status is "draft" or "rejected". "approved" and
+    "published" are always blocked -- reprocessing would either
+    silently invalidate a human sign-off or rewrite content already
+    live on YouTube. There is no override for either case here; an
+    approved episode must be explicitly rejected/reset first.
+
+    Synchronous pre-check for the same fast-feedback reason
+    /episodes/select has one -- the task (reprocess_episode,
+    app/tasks/ranking.py) repeats this check itself before doing
+    anything, since it runs out-of-process.
+    """
+    with SessionLocal() as db:
+        episode = db.get(Episode, episode_id)
+
+        if episode is None:
+            raise HTTPException(status_code=404, detail="Episode not found.")
+
+        if episode.status not in REPROCESSABLE_STATUSES:
+            reason = classify_existing_episode(episode)
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "episode_id": episode.id,
+                    "episode_date": episode.episode_date.isoformat(),
+                    "error": reason,
+                    "detail": _EXISTING_EPISODE_MESSAGES.get(
+                        reason,
+                        "This episode cannot be reprocessed in its current state.",
+                    ),
+                },
+            )
+
+    task = reprocess_episode.delay(episode_id)
+    return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
 @app.post("/api/v1/episodes/{episode_id}/publish")
 def trigger_episode_publish(episode_id: int):
     """
@@ -504,7 +695,8 @@ def list_episodes():
             )
             result.append({
                 "episode_id": episode.id,
-                "run_date": episode.run_date,
+                "episode_date": episode.episode_date,
+                "episode_key": episode_key(episode.episode_date),
                 "status": episode.status,
                 "video_status": episode.video_status,
                 "qa_status": episode.qa_status,
@@ -575,7 +767,7 @@ def get_episode(episode_id: int):
         return _serialize_episode(db, episode)
 
 
-def _discovery_info(story: Story) -> dict | None:
+def _discovery_info(item: NewsItem) -> dict | None:
     """
     When a story was surfaced via an aggregator/discovery channel that's
     distinct from where it was actually published (source_name is
@@ -586,10 +778,10 @@ def _discovery_info(story: Story) -> dict | None:
     ingested directly (source_type == "rss"), where there's no separate
     discovery channel to show.
     """
-    if story.source_type == "hackernews" and story.external_id:
+    if item.source_type == "hackernews" and item.external_id:
         return {
             "label": "Hacker News",
-            "url": f"https://news.ycombinator.com/item?id={story.external_id}",
+            "url": f"https://news.ycombinator.com/item?id={item.external_id}",
         }
     return None
 
@@ -599,13 +791,15 @@ def _serialize_episode(db, episode: Episode) -> dict:
     Shared serialization for the two episode-viewing endpoints above.
     Splits the selection into primary (Top 25) and backup (next 5)
     lists, each ordered by rank_position, joined against the actual
-    story data.
+    story data (raw.NewsItem for source/publish facts, editorial.
+    StoryState for editorial judgment -- see app/models.py).
     """
 
     rows = (
-        db.query(EpisodeStory, Story, StoryContent)
-        .join(Story, EpisodeStory.story_id == Story.id)
-        .outerjoin(StoryContent, StoryContent.story_id == Story.id)
+        db.query(EpisodeStory, NewsItem, StoryState, StoryContent)
+        .join(NewsItem, EpisodeStory.story_id == NewsItem.id)
+        .join(StoryState, StoryState.id == NewsItem.id)
+        .outerjoin(StoryContent, StoryContent.story_id == NewsItem.id)
         .filter(EpisodeStory.episode_id == episode.id)
         .order_by(EpisodeStory.rank_position.asc())
         .all()
@@ -614,32 +808,32 @@ def _serialize_episode(db, episode: Episode) -> dict:
     primary = []
     backup = []
 
-    for episode_story, story, content in rows:
+    for episode_story, item, state, content in rows:
         entry = {
             "rank_position": episode_story.rank_position,
             "rank_score": episode_story.rank_score,
             "rank_reason": episode_story.rank_reason,
-            "story_id": story.id,
-            "title": story.title,
-            "url": story.url,
-            "source_name": story.source_name,
-            "author": story.author,
-            "published_at": story.published_at,
-            "collected_at": story.collected_at,
-            "discovery": _discovery_info(story),
+            "story_id": item.id,
+            "title": item.title,
+            "url": item.canonical_url,
+            "source_name": item.source_name,
+            "author": item.author,
+            "published_at": item.published_at,
+            "collected_at": item.collected_at,
+            "discovery": _discovery_info(item),
             # Labels only (see app/extraction/taxonomy.py) -- does not
             # affect ranking eligibility or selection.
-            "taxonomy_category": story.taxonomy_category,
-            "verification_status": story.verification_status,
-            "verification_reason": story.verification_reason,
-            "extracted_facts": json.loads(story.extracted_facts) if story.extracted_facts else None,
+            "taxonomy_category": state.taxonomy_category,
+            "verification_status": state.verification_status,
+            "verification_reason": state.verification_reason,
+            "extracted_facts": json.loads(state.extracted_facts) if state.extracted_facts else None,
             # Soft signal only (see app/tasks/ranking.py's eligibility
             # comment) -- non-null means content-based similarity
             # flagged this story as likely repeating an already-
             # narrated past story, but it was still selectable; the
             # editor decides whether to swap it out.
-            "repeats_story_id": story.repeats_story_id,
-            "repeat_reason": story.repeat_reason,
+            "repeats_story_id": state.repeats_story_id,
+            "repeat_reason": state.repeat_reason,
             # Needed by the dashboard's "click a story, jump the
             # player" feature (sums preceding durations) and its edit
             # panel -- None until that story's content pipeline runs.
@@ -678,7 +872,8 @@ def _serialize_episode(db, episode: Episode) -> dict:
 
     return {
         "episode_id": episode.id,
-        "run_date": episode.run_date,
+        "episode_date": episode.episode_date,
+        "episode_key": episode_key(episode.episode_date),
         "status": episode.status,
         "created_at": episode.created_at,
         "primary_count": len(primary),
@@ -711,38 +906,40 @@ def list_stories(limit: int = 30):
     limit = max(1, min(limit, 100))
 
     with SessionLocal() as db:
-        stories = db.scalars(
-            select(Story)
+        rows = (
+            db.query(NewsItem, StoryState)
+            .join(StoryState, StoryState.id == NewsItem.id)
             # Only expose stories classified as AI candidates.
-            .where(Story.ai_relevance == "ai_candidate")
+            .filter(StoryState.ai_relevance == "ai_candidate")
             # Exclude stories that were grouped as duplicates of
             # another story -- only the canonical representative of
             # each duplicate cluster should reach downstream ranking.
-            .where(Story.canonical_story_id.is_(None))
+            .filter(StoryState.canonical_story_id.is_(None))
             # Show newest published stories first.
-            .order_by(Story.published_at.desc())
+            .order_by(NewsItem.published_at.desc())
             # Apply the requested result limit.
             .limit(limit)
-        ).all()
+            .all()
+        )
 
         return [
             {
-                "id": story.id,
-                "title": story.title,
-                "url": story.url,
-                "source_name": story.source_name,
-                "source_type": story.source_type,
-                "published_at": story.published_at,
-                "collected_at": story.collected_at,
-                "status": story.status,
+                "id": item.id,
+                "title": item.title,
+                "url": item.canonical_url,
+                "source_name": item.source_name,
+                "source_type": item.source_type,
+                "published_at": item.published_at,
+                "collected_at": item.collected_at,
+                "status": item.status,
                 # Return the filter classification for API consumers.
-                "ai_relevance": story.ai_relevance,
+                "ai_relevance": state.ai_relevance,
                 # Return the deterministic relevance score.
-                "ai_relevance_score": story.ai_relevance_score,
+                "ai_relevance_score": state.ai_relevance_score,
                 # Return why the filter classified the story this way.
-                "filter_reason": story.filter_reason,
+                "filter_reason": state.filter_reason,
             }
-            for story in stories
+            for item, state in rows
         ]
 
 
@@ -759,9 +956,9 @@ def trigger_content_production(story_id: int):
     end before wiring them up to run across an entire Top-25 episode.
     """
     with SessionLocal() as db:
-        story = db.get(Story, story_id)
+        item = db.get(NewsItem, story_id)
 
-        if story is None:
+        if item is None:
             raise HTTPException(status_code=404, detail="Story not found.")
 
     task = generate_script_task.delay(story_id)
@@ -886,20 +1083,22 @@ def list_duplicates(story_id: int):
     """
 
     with SessionLocal() as db:
-        duplicates = db.scalars(
-            select(Story)
-            .where(Story.canonical_story_id == story_id)
-            .order_by(Story.published_at.asc())
-        ).all()
+        rows = (
+            db.query(NewsItem, StoryState)
+            .join(StoryState, StoryState.id == NewsItem.id)
+            .filter(StoryState.canonical_story_id == story_id)
+            .order_by(NewsItem.published_at.asc())
+            .all()
+        )
 
         return [
             {
-                "id": story.id,
-                "title": story.title,
-                "url": story.url,
-                "source_name": story.source_name,
-                "published_at": story.published_at,
-                "dedup_reason": story.dedup_reason,
+                "id": item.id,
+                "title": item.title,
+                "url": item.canonical_url,
+                "source_name": item.source_name,
+                "published_at": item.published_at,
+                "dedup_reason": state.dedup_reason,
             }
-            for story in duplicates
+            for item, state in rows
         ]

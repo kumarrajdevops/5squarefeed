@@ -20,10 +20,10 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
     rather than trusting that an earlier stage's own success report
     was accurate.
 
-    `story_rows` is a list of (EpisodeStory, Story, StoryContent)
-    tuples for every primary story that reached video_ready and was
-    actually included in the final video (see app/tasks/episode_qa.py
-    for how this is assembled).
+    `story_rows` is a list of (EpisodeStory, NewsItem, StoryState,
+    StoryContent) tuples for every primary story that reached
+    video_ready and was actually included in the final video (see
+    app/tasks/episode_qa.py for how this is assembled).
 
     Returns a list of {"check", "passed", "detail"} dicts.
     """
@@ -39,7 +39,7 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
     })
 
     # 2. AI-only -- every included story is a classified ai_candidate.
-    non_ai = [s.id for _, s, _ in story_rows if s.ai_relevance != "ai_candidate"]
+    non_ai = [item.id for _, item, state, _ in story_rows if state.ai_relevance != "ai_candidate"]
     checks.append({
         "check": "ai_only",
         "passed": len(non_ai) == 0,
@@ -55,7 +55,7 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
     # Same as duration_target below: this is an honest report, not a
     # gate -- QA never blocks approval (see main.py), and an episode
     # with unverified stories can still legitimately be approved.
-    unverified = [s.id for _, s, _ in story_rows if s.verification_status != "verified"]
+    unverified = [item.id for _, item, state, _ in story_rows if state.verification_status != "verified"]
     checks.append({
         "check": "source_verification",
         "passed": len(unverified) == 0,
@@ -66,7 +66,7 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
     })
 
     # 4. Source links -- every included story has a real url.
-    missing_urls = [s.id for _, s, _ in story_rows if not s.url]
+    missing_urls = [item.id for _, item, _, _ in story_rows if not item.canonical_url]
     checks.append({
         "check": "source_links",
         "passed": len(missing_urls) == 0,
@@ -78,8 +78,8 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
 
     # 5. Captions -- path recorded AND file actually exists on disk.
     missing_captions = [
-        s.id for _, s, c in story_rows
-        if not c.captions_path or not Path(c.captions_path).exists()
+        item.id for _, item, _, content in story_rows
+        if not content.captions_path or not Path(content.captions_path).exists()
     ]
     checks.append({
         "check": "captions_present",
@@ -92,8 +92,8 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
 
     # 6. Audio -- path recorded AND file actually exists on disk.
     missing_audio = [
-        s.id for _, s, c in story_rows
-        if not c.audio_path or not Path(c.audio_path).exists()
+        item.id for _, item, _, content in story_rows
+        if not content.audio_path or not Path(content.audio_path).exists()
     ]
     checks.append({
         "check": "audio_present",

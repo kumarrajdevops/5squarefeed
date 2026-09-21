@@ -15,7 +15,12 @@ class Settings(BaseSettings):
     # Redis configuration
     redis_url: str = "redis://redis:6379/0"
 
-    # Daily news collection window
+    # Ranking-only recency-scoring constant (app/ranking/engine.py's
+    # compute_recency_score) -- NOT an ingestion window. Ingestion's
+    # eligibility window is calendar-day-based (app/dates.py's
+    # coverage_window), unrelated to this value; this only controls how
+    # fast a story's recency score decays with age once it's already
+    # in the eligible pool.
     news_window_hours: int = 22
 
     # YouTube Data API v3 credentials for the Publishing Worker (see

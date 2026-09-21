@@ -13,7 +13,7 @@ from app.content.video_composer import (
 from app.content.visual_generator import generate_branding_card, generate_card
 from app.content.voice_generator import synthesize_voice
 from app.db import SessionLocal
-from app.models import Episode, EpisodeStory, Story, StoryContent
+from app.models import Episode, EpisodeStory, NewsItem, StoryContent
 from app.notifications.notifier import EPISODE_VIDEO_FAILED, notify
 from app.tasks.content import MEDIA_ROOT, get_or_create_content, mark_content_failed
 from app.worker.celery_app import celery_app
@@ -57,7 +57,7 @@ def _produce_branding_clip(main_text: str, sub_text: str, narration_text: str, c
         return None
 
 
-def _produce_story_content(db, story: Story, content: StoryContent) -> bool:
+def _produce_story_content(db, story: NewsItem, content: StoryContent) -> bool:
     """
     Run a single story through all four content stages, synchronously
     and in-process (not via the Celery task chain in app/tasks/content.py
@@ -189,8 +189,8 @@ def produce_episode_video(episode_id: int) -> dict:
         db.commit()
 
         rows = (
-            db.query(EpisodeStory, Story)
-            .join(Story, EpisodeStory.story_id == Story.id)
+            db.query(EpisodeStory, NewsItem)
+            .join(NewsItem, EpisodeStory.story_id == NewsItem.id)
             .filter(
                 EpisodeStory.episode_id == episode_id,
                 EpisodeStory.selection_status == "primary",
@@ -210,7 +210,7 @@ def produce_episode_video(episode_id: int) -> dict:
         failed = 0
         video_paths: list[Path] = []
 
-        formatted_date = episode.run_date.strftime("%B %d, %Y")
+        formatted_date = episode.episode_date.strftime("%B %d, %Y")
 
         intro_path = _produce_branding_clip(
             main_text="5squareFeed",
@@ -291,8 +291,8 @@ def produce_episode_video(episode_id: int) -> dict:
         # never fails the episode -- a backup with no/failed content
         # just means a future swap won't be instant for that one story.
         backup_rows = (
-            db.query(EpisodeStory, Story)
-            .join(Story, EpisodeStory.story_id == Story.id)
+            db.query(EpisodeStory, NewsItem)
+            .join(NewsItem, EpisodeStory.story_id == NewsItem.id)
             .filter(
                 EpisodeStory.episode_id == episode_id,
                 EpisodeStory.selection_status == "backup",
