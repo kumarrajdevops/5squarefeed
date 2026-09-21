@@ -49,6 +49,20 @@ def test_extract_events_returns_empty_for_neutral_text():
     assert extract_events("The weather was pleasant this weekend.") == []
 
 
+def test_extract_events_does_not_false_positive_on_fine_tuning():
+    # Real bug, caught live during the taxonomy redesign session: bare
+    # "fine" used to be in lawsuit_regulatory's keyword set, and
+    # \bfine\b matches inside "fine-tuning"/"fine-tuned" since regex
+    # treats the hyphen as a word boundary -- a story about fine-tuning
+    # a model has nothing to do with a regulatory fine. "fined" alone
+    # (no hyphen collision) still correctly matches.
+    events = extract_events("Fyxer uses fine-tuning and real user feedback to organize inboxes.")
+    assert "lawsuit_regulatory" not in events
+
+    events = extract_events("The company was fined $2 million by regulators.")
+    assert "lawsuit_regulatory" in events
+
+
 def test_extract_dates_finds_month_name_date():
     dates = extract_dates("The event is scheduled for March 15, 2026.")
     assert any("March 15, 2026" in d for d in dates)

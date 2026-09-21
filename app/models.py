@@ -160,6 +160,18 @@ class Story(Base):
         nullable=True,
     )
 
+    # Deterministic 5-category taxonomy label (see
+    # app/extraction/taxonomy.py) -- "major_news" | "research" |
+    # "security_policy" | "business" | "developer_tools". Labels only,
+    # by explicit user decision: does NOT affect ranking eligibility or
+    # selection, purely editorial visibility. NULL until
+    # run_fact_extraction_and_verification processes the story (same
+    # timing as extracted_facts/verification_status).
+    taxonomy_category: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
     __table_args__ = (
         UniqueConstraint("url", name="uq_stories_url"),
     )

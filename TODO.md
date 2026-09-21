@@ -1674,6 +1674,126 @@ auto-blocking).
       undelivered-when-Slack-post-fails). Full `pytest` suite: 98
       tests, all passing.
 
+### This session — 2026-09-22, part 37 (taxonomy redesign: 5-category labels, no selection change)
+
+- [x] Scoped via explicit user decisions before building, since
+      `proposal.md`'s own "final taxonomy" section conflicts with
+      decisions already made this session: it proposes a local LLM for
+      classification/clustering (this project has a hard, repeatedly-
+      verified no-LLM rule) and a 9-category list. User chose: **fully
+      deterministic keyword classifier** (extends
+      `app/extraction/fact_extractor.py`'s existing `EVENT_KEYWORDS`,
+      no new dependency), a **simpler 5-category set** (Major News,
+      Research, Security/Policy, Business, Developer/Tools -- maps
+      cleanly onto existing event categories + `source_type`), and
+      **labels only for this pass** -- does NOT change which 25
+      stories get selected (`app/tasks/ranking.py` untouched), matching
+      how Verification/QA/content-similarity were all shipped as soft
+      signals first. "Event clustering" and "why it matters"
+      (`proposal.md`'s other two big ideas) are out of scope entirely
+      -- clustering is already effectively solved by existing dedup
+      (`canonical_story_id`), and "why it matters" was explicitly
+      rejected by the user in an earlier session.
+- [x] New `app/extraction/taxonomy.py`: `classify_category(title,
+      events, source_type)`, a pure, priority-ordered cascade (HN
+      community-post title convention -> content-event signals ->
+      generic-HN fallback -> Major News default). New
+      `Story.taxonomy_category` column (migration `e5a8c3f716d4`),
+      populated in `run_fact_extraction_and_verification`
+      (`app/tasks/verification.py`) reusing the events already
+      extracted there -- no separate pass, no re-computation. Exposed
+      via `_serialize_episode` and a new dashboard pill (5 new
+      light/dark CSS color tokens, one hue per category, distinct from
+      the existing pass/fail/skip semantic colors).
+- [x] **Two real bugs found via live verification against real data
+      (not shipped)**, both fixed:
+      1. **HN "Show HN:"/"Launch HN:" posts misclassified as
+         Research.** A real post ("Show HN: Swift-Qwen3.8-27B, ...")
+         about a model speedup got tagged Research because its body
+         text's benchmark numbers tripped `fact_extractor.py`'s
+         `"research"` event keyword (`"benchmark"`) -- a coincidental
+         body-text hit outranked the author's own deliberate title
+         convention. Fixed by checking the HN title-prefix signal
+         FIRST, before content-event signals, in the priority cascade
+         (previously second).
+      2. **`"fine-tuning"`/`"fine-tuned"` false-positived as a
+         regulatory fine**, in `fact_extractor.py` itself (pre-existing,
+         not new code) -- `\bfine\b` matches inside `"fine-tuning"`
+         since regex treats the hyphen as a word boundary. A story
+         about an AI email assistant's fine-tuning got mislabeled
+         Security/Policy. Fixed by dropping bare `"fine"` from
+         `lawsuit_regulatory`'s keyword set (kept `"fined"`, which
+         has no such collision) -- same class of fix as this session's
+         earlier bare-`"policy"` false positive.
+      Both caught by resetting real, already-ingested stories back to
+      `verification_status="pending"` and re-running classification
+      against them (not synthetic data), inspecting the real category
+      distribution and individual titles for plausibility -- not just
+      confirming the code ran without erroring.
+- [x] Added `tests/test_taxonomy.py` (9 tests, including a direct
+      regression test for the Show-HN-vs-research-event priority
+      conflict) and a new regression test in
+      `tests/test_fact_extractor.py` for the fine-tuning false
+      positive. Full `pytest` suite: 109 tests, all passing.
+- [x] **Verified live end-to-end**: real distribution across the
+      eligible pool (44 major_news, 37 developer_tools, 14
+      security_policy, 4 business, 4 research) with individual titles
+      spot-checked per category for plausibility; confirmed the
+      dashboard pill renders correctly (distinct color per category)
+      against a real episode's story list.
+- [ ] Whether this ever becomes a real budget/diversity selection
+      algorithm (guaranteeing category representation in the Top 25,
+      not just labeling it) is an open, deliberately deferred decision
+      -- revisit once real category-distribution data over many days
+      shows whether one category actually crowds out others.
+
+### This session — 2026-09-22, part 38 (human-navigable repeat labels: "epXsY")
+
+- [x] User noticed a story (`#108`, "Microsoft AI CEO says AI threats
+      are real...") had no taxonomy label in an old episode's view,
+      and asked why -- root cause explained (not a bug): that story is
+      itself now a content-similarity duplicate of story `#78`
+      (`canonical_story_id = 78`, a borderline 0.36-similarity match
+      already flagged as questionable when the content-similarity
+      feature was built), so it's correctly excluded from taxonomy/
+      verification reprocessing; it still shows in episode #9's
+      dashboard view because that episode was selected before content-
+      dedup existed this session, and episode selections are frozen
+      snapshots, never retroactively updated.
+- [x] That explanation surfaced a real usability gap: `repeat_reason`
+      only ever showed a bare numeric `repeats_past_primary_story_id`,
+      not where an editor could actually go look at it. Added a
+      human-navigable label: `app/tasks/content_dedup.py`'s historical-
+      repeat detection now looks up which episode/rank position
+      (`EpisodeStory.episode_id`/`rank_position`) the matched story was
+      primary in -- safe to treat as a single unambiguous slot per
+      story thanks to the "never re-select" invariant
+      (`app/tasks/ranking.py`) -- and appends it to `repeat_reason` as
+      `(epXsY)`, e.g. `(ep13s1)` = episode #13, rank 1. Shows up
+      automatically everywhere `repeat_reason` already renders (the
+      dashboard's "possible repeat" pill tooltip and edit-panel row) --
+      no new UI wiring needed, since it's baked into the existing text
+      field at detection time (same "reason string is the audit trail"
+      pattern as `dedup_reason`/`filter_reason`/`rank_reason`).
+- [x] **Verified live against real data**: confirmed the two stories
+      previously flagged as historical repeats (`#149`/`#155`) had
+      since themselves been selected as primary in episode #13 --
+      exactly why they no longer showed up as reprocessable candidates
+      when first attempting to re-test this (a real, correct
+      side-effect of the soft-signal design: a flagged-but-still-
+      selectable story can absolutely go on to become a historical
+      primary itself). Constructed a controlled synthetic duplicate
+      (copied story #149's real `raw_content` verbatim into a
+      throwaway test story) specifically to exercise the new label
+      path, confirmed `repeat_reason` correctly read
+      `"...repeats_past_primary_story_id=149 (ep13s1)"` -- matching
+      story #149's real, independently-confirmed episode/rank exactly.
+      Cleaned up the throwaway story afterward. Full `pytest` suite:
+      109 tests, all passing (no new dedicated test added -- this
+      logic lives inside `enrich_and_dedup_by_content` itself, same
+      accepted not-unit-tested-directly pattern as the rest of that
+      task; covered by this live verification instead).
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -1746,16 +1866,20 @@ original `project.md` description was broader than what's built:
 - [ ] Analytics Worker (views, retention, watch time, shares, likes/comments, followers)
 - [x] Notification Worker -- detection + audit trail + real Slack
       delivery (see part 35/36 below), verified live end-to-end.
+- [~] Taxonomy redesign -- deterministic 5-category classification
+      built and labels shown in the dashboard (see "part 37" above);
+      still just labels, no budget/diversity selection algorithm yet
+      (see the design principle note right below).
 - [ ] Optimization Engine (feed analytics back into ranking)
 - [ ] AWS evolution (EventBridge scheduled jobs, RDS, S3)
 - [ ] Kubernetes/EKS evolution
 
 ### Design principle for the future taxonomy/categorized-episode work
 
-From `proposal.md` (see the taxonomy-redesign item above, not yet
-scheduled) -- worth preserving on its own since it reframes what
-"Top 25" even means, independent of whether/when the fuller
-Major-News/Developer-Radar/Research/Tools redesign gets built:
+From `proposal.md` -- worth preserving on its own since it reframes
+what "Top 25" even means, independent of whether/when an actual
+budget/diversity selection algorithm gets built on top of the
+category labels ("part 37" above) that exist today:
 
 > The 25 is a **daily information budget**, not a claim that 25 major
 > news events happened. Some days: 9 major news + 4 research + 3
@@ -1773,6 +1897,7 @@ weighted budget categories rather than diluted "news" means a quiet
 major-news day doesn't have to mean an under-filled or padded-with-
 junk episode -- Hacker News alone reliably supplies 19-24 qualifying
 items/day (verified this session) across exactly these categories.
-This only pays off once content-type classification and per-category
-ranking exist (part of the larger taxonomy redesign, not built yet) --
-recorded here now so the principle isn't lost before that work starts.
+Content-type classification now exists ("part 37" above); per-category
+*ranking* (an actual budget algorithm, not just labels) does not --
+recorded here now so the principle isn't lost before that work starts,
+whenever it does.

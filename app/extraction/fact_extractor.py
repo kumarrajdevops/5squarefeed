@@ -45,8 +45,14 @@ EVENT_KEYWORDS: dict[str, set[str]] = {
     },
     "lawsuit_regulatory": {
         "lawsuit", "sues", "sued", "suing", "antitrust", "regulator",
-        "ban", "banned", "fine", "fined", "investigation",
+        "ban", "banned", "fined", "investigation",
     },
+    # Deliberately not bare "fine" -- confirmed live (during the
+    # taxonomy redesign session) it false-positives on "fine-tuning"/
+    # "fine-tuned": regex \b treats the hyphen as a word boundary, so
+    # "fine" inside "fine-tuning" matches as a whole word even though
+    # it has nothing to do with a regulatory fine. "fined" alone is
+    # unambiguous and doesn't have this collision, so it stays.
     "research": {"paper", "study", "research", "benchmark"},
     "partnership": {
         "partners with", "partnered with", "partnership", "collaborates",

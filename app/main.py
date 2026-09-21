@@ -608,6 +608,9 @@ def _serialize_episode(db, episode: Episode) -> dict:
             "published_at": story.published_at,
             "collected_at": story.collected_at,
             "discovery": _discovery_info(story),
+            # Labels only (see app/extraction/taxonomy.py) -- does not
+            # affect ranking eligibility or selection.
+            "taxonomy_category": story.taxonomy_category,
             "verification_status": story.verification_status,
             "verification_reason": story.verification_reason,
             "extracted_facts": json.loads(story.extracted_facts) if story.extracted_facts else None,

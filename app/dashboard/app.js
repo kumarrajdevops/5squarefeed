@@ -428,6 +428,17 @@ function computeStartOffset(ep, targetStoryId) {
   return null;
 }
 
+// Display labels for app/extraction/taxonomy.py's 5-category taxonomy
+// -- labels only, doesn't affect ranking/selection (see
+// app/tasks/ranking.py's eligibility comment).
+const TAXONOMY_LABELS = {
+  major_news: "Major News",
+  research: "Research",
+  security_policy: "Security/Policy",
+  business: "Business",
+  developer_tools: "Developer/Tools",
+};
+
 function renderStoryList(listId, stories, ep, jumpable) {
   const ul = document.getElementById(listId);
 
@@ -440,6 +451,9 @@ function renderStoryList(listId, stories, ep, jumpable) {
         ${renderSourceLinkHtml(s.url)}
       </div>
       <div class="story-pills">
+        ${s.taxonomy_category
+          ? `<span class="pill taxonomy-${s.taxonomy_category}">${TAXONOMY_LABELS[s.taxonomy_category] || s.taxonomy_category}</span>`
+          : ""}
         <span class="pill ${s.content_status || "pending"}">${s.content_status || "no content"}</span>
         <span class="pill ${s.verification_status}" title="${escapeAttr(s.verification_reason || "")}">${s.verification_status}</span>
         ${s.repeats_story_id

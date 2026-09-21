@@ -92,6 +92,13 @@ whether an article is about AI), never a call to an AI API.
   been a **primary** (narrated) selection in any earlier episode is
   never selected again, in any future episode -- an unused backup
   (never promoted, never narrated) remains eligible.
+- Deterministic taxonomy classification (`app/extraction/taxonomy.py`)
+  -- every story gets one of 5 category labels (Major News, Research,
+  Security/Policy, Business, Developer/Tools), shown as a dashboard
+  pill. Keyword-based (extends the same event categories Fact
+  Extraction already computes), not an LLM. **Labels only** -- doesn't
+  change which 25 stories get selected; see `TODO.md` for the
+  budget/diversity-selection idea this could feed into later.
 - Script/voice/visual/video content generation, free/local (no API
   keys) -- runs per-story or across a full episode, produces one
   combined branded video with intro/outro
@@ -616,7 +623,7 @@ docker exec 5squarefeed-api-1 pip install -r requirements-dev.txt
 docker exec -w /app 5squarefeed-api-1 pytest
 ```
 
-98 tests, no running Postgres required -- DB-backed tests use an
+109 tests, no running Postgres required -- DB-backed tests use an
 in-memory SQLite database (`tests/conftest.py`'s `db_session` fixture;
 every model uses portable column types, so this is a faithful stand-in)
 rather than the real dev database. Covers the deterministic filters

@@ -213,6 +213,29 @@ def enrich_and_dedup_by_content() -> dict:
                 .all()
             )
 
+            # "never re-select" (app/tasks/ranking.py) guarantees a
+            # story is primary in at most one episode ever, so this
+            # story_id -> (episode_id, rank_position) mapping is safe
+            # to build as a plain dict -- used to give repeat_reason a
+            # human-navigable "epXsY" label instead of a bare story id
+            # (e.g. "ep9s2" = episode #9, rank 2), so an editor can go
+            # straight to the episode/rank that actually narrated it.
+            episode_slot_by_story_id = {
+                story_id: (episode_id, rank_position)
+                for story_id, episode_id, rank_position in (
+                    db.query(
+                        EpisodeStory.story_id,
+                        EpisodeStory.episode_id,
+                        EpisodeStory.rank_position,
+                    )
+                    .filter(
+                        EpisodeStory.selection_status == "primary",
+                        EpisodeStory.story_id.in_(historical_story_ids),
+                    )
+                    .all()
+                )
+            }
+
             new_texts_map = {
                 s.id: get_comparable_text(s.raw_content, s.raw_summary, s.title)
                 for s in still_remaining
@@ -241,9 +264,14 @@ def enrich_and_dedup_by_content() -> dict:
                         matched_story_id = historical_ids[best_col]
                         story = stories_by_id[new_id]
                         story.repeats_story_id = matched_story_id
+
+                        slot = episode_slot_by_story_id.get(matched_story_id)
+                        episode_label = f"ep{slot[0]}s{slot[1]}" if slot else "unknown slot"
+
                         story.repeat_reason = (
                             f"content_tfidf_cosine={best_score:.2f}, "
-                            f"repeats_past_primary_story_id={matched_story_id}"
+                            f"repeats_past_primary_story_id={matched_story_id} "
+                            f"({episode_label})"
                         )
                         historical_repeats_found += 1
                         print(

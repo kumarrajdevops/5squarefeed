@@ -4,6 +4,7 @@ from sqlalchemy import func
 
 from app.db import SessionLocal
 from app.extraction.fact_extractor import extract_facts
+from app.extraction.taxonomy import classify_category
 from app.models import Story
 from app.ranking.engine import compute_credibility_score
 from app.verification.engine import verify_story
@@ -25,7 +26,11 @@ def run_fact_extraction_and_verification() -> dict:
     docstring for why): populates Story.extracted_facts/
     verification_status/verification_reason for editorial visibility
     and a small ranking score nudge -- never excludes a story from
-    becoming eligible for ranking/selection.
+    becoming eligible for ranking/selection. Also classifies each
+    story into a 5-category taxonomy label
+    (Story.taxonomy_category -- see app/extraction/taxonomy.py),
+    reusing the same extracted events; labels only, same as
+    verification -- does not affect ranking/selection either.
     """
 
     with SessionLocal() as db:
@@ -63,6 +68,11 @@ def run_fact_extraction_and_verification() -> dict:
         for story in stories:
             facts = extract_facts(title=story.title, summary=story.raw_summary)
             story.extracted_facts = json.dumps(facts)
+            story.taxonomy_category = classify_category(
+                title=story.title,
+                events=facts["events"],
+                source_type=story.source_type,
+            )
 
             duplicate_count = dup_counts.get(story.id, 0)
             credibility = compute_credibility_score(story.source_name)
