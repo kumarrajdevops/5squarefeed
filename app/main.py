@@ -14,8 +14,11 @@ from app.content.video_composer import probe_video
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
 from app.models import CollectionRun, Episode, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
 from app.tasks.content import generate_script_task
+from app.tasks.content_dedup import run_enrich_and_dedup_by_content
+from app.tasks.dedup import run_deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
 from app.tasks.episode_video import produce_episode_video
 from app.tasks.publishing import publish_episode_to_youtube
@@ -23,8 +26,10 @@ from app.tasks.ranking import (
     REPROCESSABLE_STATUSES,
     classify_existing_episode,
     reprocess_episode,
+    run_ranking_selection,
 )
 from app.tasks.scheduled import run_daily_processing
+from app.tasks.verification import run_verification
 from app.worker.celery_app import celery_app
 
 
@@ -153,6 +158,26 @@ def _reject_if_not_dev() -> None:
         )
 
 
+def _validate_date_param(value: str | None, param_name: str) -> None:
+    """
+    Shared "YYYY-MM-DD or omit" validation for the DEV-only per-stage
+    trigger endpoints below. Validated here rather than left to the
+    Celery task: the task runs out-of-process, so an invalid value
+    would otherwise fail silently from the caller's perspective
+    (HTTP 200 + queued task_id, with the actual ValueError only
+    visible in the worker logs).
+    """
+    if value is None:
+        return
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid {param_name} {value!r}; expected YYYY-MM-DD.",
+        )
+
+
 @app.post("/api/v1/collection/run")
 def trigger_collection(target_date: str | None = None):
     """
@@ -170,15 +195,7 @@ def trigger_collection(target_date: str | None = None):
     this.
     """
     _reject_if_not_dev()
-
-    if target_date is not None:
-        try:
-            date.fromisoformat(target_date)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid target_date {target_date!r}; expected YYYY-MM-DD.",
-            )
+    _validate_date_param(target_date, "target_date")
 
     task = run_collection.delay(target_date_iso=target_date, trigger_type="manual")
     return {"task_id": task.id, "status": "queued"}
@@ -233,6 +250,97 @@ def list_collection_runs(collection_date: str | None = None, limit: int = 20):
             }
             for run in runs
         ]
+
+
+# ---------------------------------------------------------
+# Per-stage processing triggers -- DEV-only. Production never calls
+# these individually; the scheduled 4 AM IST pass always runs the full
+# sequence via POST /api/v1/episodes/select (app/tasks/scheduled.py's
+# run_daily_processing). These exist purely so each stage of that
+# sequence (classify -> dedup -> content-dedup -> verify -> rank) can
+# be triggered and inspected on its own while testing/debugging --
+# same rationale, same _reject_if_not_dev() guard, as
+# POST /api/v1/collection/run above.
+# ---------------------------------------------------------
+
+
+@app.post("/api/v1/processing/classify")
+def trigger_classify(target_date: str | None = None):
+    """
+    Create editorial.StoryState rows (ai_relevance) for target_date's
+    not-yet-classified raw.news_items -- see
+    app/tasks/classify.py::classify_new_raw_items. Idempotent: already-
+    classified rows are skipped.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_classify_new_raw_items.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/dedup")
+def trigger_dedup(target_date: str | None = None):
+    """
+    Title-similarity dedup pass over target_date's ai_candidate stories
+    -- see app/tasks/dedup.py::deduplicate_new_stories. Idempotent:
+    only touches stories with canonical_story_id IS NULL.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_deduplicate_new_stories.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/content-dedup")
+def trigger_content_dedup(target_date: str | None = None):
+    """
+    Full-article-text content dedup + historical-repeat detection over
+    target_date's remaining canonical stories -- see
+    app/tasks/content_dedup.py::enrich_and_dedup_by_content. Fetches
+    real article pages for stories not already attempted; can take a
+    while for a large batch.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_enrich_and_dedup_by_content.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/verify")
+def trigger_verify(target_date: str | None = None):
+    """
+    Fact Extraction + Verification Engine + taxonomy pass over
+    target_date's remaining canonical, ai_candidate, still-pending
+    stories -- see
+    app/tasks/verification.py::run_fact_extraction_and_verification.
+    Soft signal only -- never excludes a story from ranking.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_verification.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/rank")
+def trigger_rank(episode_date: str | None = None):
+    """
+    Rank + select the Top 25 + 5 backups and create the episode_date's
+    Episode row -- see app/tasks/ranking.py::run_ranking_selection.
+    Same idempotency as POST /api/v1/episodes/select (an existing
+    episode is never duplicated or silently touched), but without that
+    endpoint's synchronous pre-check -- the task itself still returns
+    a blocked/reused result rather than erroring, it's just not known
+    until the task result is read back.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(episode_date, "episode_date")
+
+    task = run_ranking_selection.delay(episode_date)
+    return {"task_id": task.id, "status": "queued"}
 
 
 @app.get("/api/v1/tasks/{task_id}/result")

@@ -1,5 +1,10 @@
+from datetime import date
+
+from app.dates import target_collection_date
+from app.db import SessionLocal
 from app.filters.dedup import find_duplicate_match
 from app.models import NewsItem, StoryState
+from app.worker.celery_app import celery_app
 
 
 def deduplicate_new_stories(db, target_date) -> dict:
@@ -88,3 +93,16 @@ def deduplicate_new_stories(db, target_date) -> dict:
     print(f"[dedup] Completed: {result}")
 
     return result
+
+
+@celery_app.task
+def run_deduplicate_new_stories(target_date_iso: str | None = None) -> dict:
+    """
+    Standalone Celery entry point for deduplicate_new_stories -- see
+    run_classify_new_raw_items's docstring (app/tasks/classify.py) for
+    why this exists alongside the full run_daily_processing sequence.
+    """
+    target_date = date.fromisoformat(target_date_iso) if target_date_iso else target_collection_date()
+
+    with SessionLocal() as db:
+        return deduplicate_new_stories(db, target_date)

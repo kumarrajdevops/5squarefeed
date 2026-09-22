@@ -1,7 +1,10 @@
 import hashlib
 import time
+from datetime import date
 
 from app.content.article_extractor import fetch_full_article_text
+from app.dates import target_collection_date
+from app.db import SessionLocal
 from app.filters.dedup import TIME_WINDOW_HOURS
 from app.filters.content_similarity import (
     CONTENT_SIMILARITY_THRESHOLD,
@@ -10,6 +13,7 @@ from app.filters.content_similarity import (
     get_comparable_text,
 )
 from app.models import EpisodeStory, NewsItem, StoryState
+from app.worker.celery_app import celery_app
 
 
 # Polite, fixed delay between full-article fetches -- there's no
@@ -296,3 +300,17 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
     print(f"[content-dedup] Completed: {result}")
 
     return result
+
+
+@celery_app.task
+def run_enrich_and_dedup_by_content(target_date_iso: str | None = None) -> dict:
+    """
+    Standalone Celery entry point for enrich_and_dedup_by_content --
+    see run_classify_new_raw_items's docstring (app/tasks/classify.py)
+    for why this exists alongside the full run_daily_processing
+    sequence.
+    """
+    target_date = date.fromisoformat(target_date_iso) if target_date_iso else target_collection_date()
+
+    with SessionLocal() as db:
+        return enrich_and_dedup_by_content(db, target_date)

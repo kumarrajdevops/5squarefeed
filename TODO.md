@@ -2029,6 +2029,50 @@ auto-blocking).
       "part 22" above. Human approval remains manual, per the
       architecture.
 
+### Requested 2026-09-22 (not yet scheduled)
+
+- [ ] **Full article-content web scraping as the real content source.**
+      Full-article fetching already exists
+      (`app/content/article_extractor.py::fetch_full_article_text`),
+      but today it's only used transiently inside content-dedup
+      (`app/tasks/content_dedup.py`) for TF-IDF comparison -- the
+      result isn't treated as the story's real content. Extend this
+      so script generation (`app/tasks/content.py`/`episode_video.py`)
+      can draw on the full scraped body instead of RSS's often-thin
+      `raw_summary`. Needs a decision on whether `raw.news_items.
+      raw_content` becomes the permanent full-text store (it's
+      currently populated by content-dedup's fetch as a side effect)
+      or a separate field/table, and how failures degrade (same
+      fetch_error/non_html/empty_extraction statuses already exist).
+- [ ] **More RSS feeds.** `app/sources/registry.py` currently has 11
+      sources (one disabled -- VentureBeat, Vercel bot-challenge).
+      Expand coverage to raise the daily raw-item ceiling (candidates:
+      Anthropic blog, Meta AI blog, Simon Willison's blog, r/
+      MachineLearning, etc.) -- directly helps the "will we run out of
+      25+5 stories" concern from earlier this session, now that a
+      real full Top-25+5 selection has been observed (2026-09-21,
+      "part 41" above) once RSS+HN volume was high enough for one day.
+- [ ] **More taxonomy labels.** Current 5-category deterministic
+      taxonomy (`app/extraction/taxonomy.py`, "part 37" above) is
+      intentionally coarse, labels-only. Revisit alongside (not
+      before) the budget/diversity selection algorithm described in
+      the design-principle note just below -- expanding labels with no
+      consumer for them yet is premature.
+- [ ] **Visual workflow chart in the dashboard.** A diagram/flowchart
+      view of the full pipeline (Collect -> Classify -> Dedup ->
+      Content-Dedup -> Verify -> Rank & Select -> Produce -> QA ->
+      Approve -> Publish) showing each stage's current status for a
+      given date/episode at a glance -- complements, doesn't replace,
+      the per-stage buttons added this session ("part 41"'s Process
+      Episode / individual stage buttons).
+- [ ] **Surface task/worker logs in the dashboard.** No way today to
+      see what a task actually did short of `docker compose logs
+      worker` on the host. Consider a per-task-id or per-episode log
+      viewer -- could reuse the existing Celery Redis result backend
+      (`GET /api/v1/tasks/{task_id}/result` already exposes the return
+      value, but not stdout/print output) or a dedicated log capture/
+      tail endpoint.
+
 ## Future phases (per `project.md`)
 
 Script/Voice/Visual/Video are now built in simplified/free form, at

@@ -1,5 +1,10 @@
+from datetime import date
+
+from app.dates import target_collection_date
+from app.db import SessionLocal
 from app.filters.ai_relevance import calculate_ai_relevance
 from app.models import NewsItem, StoryState
+from app.worker.celery_app import celery_app
 
 
 def classify_new_raw_items(db, target_date) -> dict:
@@ -51,3 +56,18 @@ def classify_new_raw_items(db, target_date) -> dict:
     result = {"classified": classified, "ai_candidates": ai_candidates}
     print(f"[classify] Completed: {result}")
     return result
+
+
+@celery_app.task
+def run_classify_new_raw_items(target_date_iso: str | None = None) -> dict:
+    """
+    Standalone Celery entry point for classify_new_raw_items -- lets
+    this one stage be triggered independently (dev/debug -- see
+    POST /api/v1/processing/classify in app/main.py) rather than only
+    as part of app/tasks/scheduled.py's full run_daily_processing
+    sequence. Same idempotency as that function itself.
+    """
+    target_date = date.fromisoformat(target_date_iso) if target_date_iso else target_collection_date()
+
+    with SessionLocal() as db:
+        return classify_new_raw_items(db, target_date)

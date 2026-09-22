@@ -1,12 +1,16 @@
 import json
+from datetime import date
 
 from sqlalchemy import func
 
+from app.dates import target_collection_date
+from app.db import SessionLocal
 from app.extraction.fact_extractor import extract_facts
 from app.extraction.taxonomy import classify_category
 from app.models import NewsItem, StoryState
 from app.ranking.engine import compute_credibility_score
 from app.verification.engine import verify_story
+from app.worker.celery_app import celery_app
 
 
 def run_fact_extraction_and_verification(db, target_date) -> dict:
@@ -103,3 +107,17 @@ def run_fact_extraction_and_verification(db, target_date) -> dict:
     print(f"[verification] Completed: {result}")
 
     return result
+
+
+@celery_app.task
+def run_verification(target_date_iso: str | None = None) -> dict:
+    """
+    Standalone Celery entry point for
+    run_fact_extraction_and_verification -- see
+    run_classify_new_raw_items's docstring (app/tasks/classify.py) for
+    why this exists alongside the full run_daily_processing sequence.
+    """
+    target_date = date.fromisoformat(target_date_iso) if target_date_iso else target_collection_date()
+
+    with SessionLocal() as db:
+        return run_fact_extraction_and_verification(db, target_date)

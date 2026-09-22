@@ -439,6 +439,90 @@ function wireProcessButton() {
 }
 
 // ---------------------------------------------------------
+// Individual processing-stage buttons (dev/local only) -- each hits
+// its own DEV-only POST /api/v1/processing/{stage} endpoint
+// (app/main.py), which queues that ONE stage's Celery task directly
+// (see app/tasks/classify.py|dedup.py|content_dedup.py|verification.py|
+// ranking.py's run_* wrappers) rather than the full run_daily_processing
+// sequence Process Episode (all steps) triggers. Same click->queue->
+// poll->summary shape as Collect/Process above, factored into one
+// reusable helper since all five stage buttons behave identically,
+// differing only in endpoint path and how to summarize that stage's
+// particular result dict.
+// ---------------------------------------------------------
+
+function wireStageButton({ btnId, resultId, path, formatResult, onSuccess }) {
+  const btn = document.getElementById(btnId);
+  const resultEl = document.getElementById(resultId);
+  if (!btn) return;
+
+  const originalLabel = btn.textContent;
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    resultEl.innerHTML = "";
+
+    const startTime = Date.now();
+    const tick = () => {
+      btn.innerHTML = `<span class="spinner" aria-hidden="true"></span> ${formatElapsed(Date.now() - startTime)}`;
+    };
+    tick();
+    const timerInterval = setInterval(tick, 1000);
+
+    const stopLoading = () => {
+      clearInterval(timerInterval);
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    };
+
+    let queued;
+    try {
+      queued = await apiPost(path);
+    } catch (err) {
+      stopLoading();
+      resultEl.innerHTML = `<strong>Failed to queue</strong><br>${escapeHtml(err.message)}`;
+      return;
+    }
+
+    const pollStart = Date.now();
+    let finished = null;
+
+    while (Date.now() - pollStart < PROCESS_POLL_TIMEOUT_MS) {
+      const res = await fetchTaskResult(queued.task_id);
+      if (res && res.status !== "pending") {
+        finished = res;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+
+    stopLoading();
+
+    if (!finished) {
+      resultEl.innerHTML = `Still running (task ${escapeHtml(queued.task_id)}) -- check back.`;
+      return;
+    }
+
+    if (finished.status === "failed") {
+      resultEl.innerHTML = `<strong>Failed</strong><br>${escapeHtml(finished.error || "")}`;
+      return;
+    }
+
+    resultEl.innerHTML = `<strong>✓ Done</strong> -- ${formatResult(finished.result || {})}`;
+
+    // Delayed, not immediate -- onSuccess (e.g. Rank & Select's
+    // renderEpisodeList) does a full page re-render, which would
+    // otherwise wipe this message (and every other stage button's
+    // own result) before it's ever seen. Same fix as
+    // wireProcessButton's processCollapseTimer above.
+    if (onSuccess) {
+      setTimeout(onSuccess, RESULT_COLLAPSE_MS);
+    }
+  });
+}
+
+// ---------------------------------------------------------
 // Episode list
 // ---------------------------------------------------------
 
@@ -458,10 +542,24 @@ async function renderEpisodeList() {
       <div class="panel collect-panel">
         <div class="collect-row">
           <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
-          <button class="btn" id="process-btn" type="button">Process Episode</button>
+          <button class="btn" id="process-btn" type="button">Process Episode (all steps)</button>
         </div>
         <p id="collect-result" class="collect-result"></p>
         <p id="process-result" class="collect-result"></p>
+
+        <p class="collect-stage-label">Or run each processing step individually:</p>
+        <div class="collect-row">
+          <button class="btn btn-small" id="classify-btn" type="button">1. Classify</button>
+          <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
+          <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
+          <button class="btn btn-small" id="verify-btn" type="button">4. Verify</button>
+          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select</button>
+        </div>
+        <p id="classify-result" class="collect-result"></p>
+        <p id="dedup-stage-result" class="collect-result"></p>
+        <p id="content-dedup-result" class="collect-result"></p>
+        <p id="verify-result" class="collect-result"></p>
+        <p id="rank-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -470,6 +568,31 @@ async function renderEpisodeList() {
     if (!isDevEnvironment(appEnv)) return;
     wireCollectButton();
     wireProcessButton();
+    wireStageButton({
+      btnId: "classify-btn", resultId: "classify-result", path: "/processing/classify",
+      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates.`,
+    });
+    wireStageButton({
+      btnId: "dedup-stage-btn", resultId: "dedup-stage-result", path: "/processing/dedup",
+      formatResult: (r) => `Checked ${r.checked ?? "?"}, found ${r.duplicates_found ?? "?"} duplicates.`,
+    });
+    wireStageButton({
+      btnId: "content-dedup-btn", resultId: "content-dedup-result", path: "/processing/content-dedup",
+      formatResult: (r) =>
+        `Fetched ${r.fetch_success ?? "?"}/${r.fetch_attempted ?? "?"} articles -- ` +
+        `${r.content_duplicates_found ?? "?"} content duplicates, ${r.historical_repeats_found ?? "?"} historical repeats.`,
+    });
+    wireStageButton({
+      btnId: "verify-btn", resultId: "verify-result", path: "/processing/verify",
+      formatResult: (r) => `${r.verified ?? "?"} verified / ${r.unverified ?? "?"} unverified (of ${r.processed ?? "?"}).`,
+    });
+    wireStageButton({
+      btnId: "rank-btn", resultId: "rank-result", path: "/processing/rank",
+      formatResult: (r) => r.created
+        ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
+        : `No new episode (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
+      onSuccess: () => renderEpisodeList(),
+    });
   };
 
   if (!episodes.length) {

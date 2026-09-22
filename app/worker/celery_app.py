@@ -9,6 +9,7 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=[
         "app.tasks.collection",
+        "app.tasks.classify",
         "app.tasks.dedup",
         "app.tasks.content_dedup",
         "app.tasks.verification",
