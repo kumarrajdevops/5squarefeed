@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app.content.storyboard_generator import _comparison_header, _derive_hero_kicker
 from app.qa.storyboard_qa import run_storyboard_qa_checks
 
 
@@ -231,3 +232,94 @@ def test_source_fidelity_fails_when_stages_were_hand_edited_beyond_what_the_narr
     storyboard["scenes"].insert(1, tampered)
     checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
     assert _check(checks, "source_fidelity")["passed"] is False
+
+
+_TITLE = "Why Deploying Physical AI at Scale Demands Safety at Every Layer."
+
+
+def test_source_fidelity_passes_when_hero_kicker_matches_fresh_re_derivation(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["title"] = _TITLE
+    storyboard["scenes"][0]["kicker"] = _derive_hero_kicker(_TITLE)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is True
+
+
+def test_source_fidelity_fails_when_hero_kicker_was_hand_edited(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["title"] = _TITLE
+    storyboard["scenes"][0]["kicker"] = "A Completely Different Made Up Phrase"
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is False
+
+
+def test_source_fidelity_passes_when_comparison_header_matches_fresh_re_derivation(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["title"] = _TITLE
+    scene = _comparison_scene()
+    scene["header"] = _comparison_header(_TITLE, scene["narration_text"], scene["left"], scene["right"])
+    storyboard["scenes"].insert(1, scene)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is True
+
+
+def test_source_fidelity_fails_when_comparison_header_was_hand_edited(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["title"] = _TITLE
+    scene = _comparison_scene()
+    scene["header"] = "AUTONOMOUS VEHICLES VS INDUSTRIAL ROBOTS"
+    storyboard["scenes"].insert(1, scene)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is False
+
+
+def test_source_fidelity_skips_kicker_and_header_re_derivation_when_title_is_absent(tmp_path):
+    """
+    Conditionally exercised, matching checks 9/10's own philosophy for
+    stories without comparison/statistic scenes: a storyboard that
+    (unusually) omits the top-level `title` field simply isn't checked
+    on this sub-rule -- it must not produce a false failure.
+    """
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][0]["kicker"] = "Whatever Kicker Was Stored"
+    scene = _comparison_scene()
+    scene["header"] = "Whatever Header Was Stored"
+    storyboard["scenes"].insert(1, scene)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is True
+
+
+# ---------------------------------------------------------------------
+# Phase 3A: check 8 generalized to any scene type's states list, not
+# just comparison.
+# ---------------------------------------------------------------------
+
+def test_scene_visual_duration_passes_for_a_generalized_non_comparison_split(tmp_path):
+    """Direct regression shape for Story #54's concept_1 (12.39s, 8.0s cap) after the Phase 3A fix."""
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, {
+        "scene_id": "concept_1", "scene_type": "concept", "order": 1,
+        "start": 4.02, "end": 16.41, "duration": 12.39,
+        "narration_text": "Clean energy isn't hard to come by, but the pace of large-scale adoption has historically been slow.",
+        "motion": {"type": "headline_reveal", "states": [
+            {"name": "segment_1", "duration": 6.195, "is_ramp": False, "zoom": 1.0},
+            {"name": "segment_2", "duration": 6.195, "is_ramp": False, "zoom": 1.03},
+        ]},
+        "source_segment_indices": [1],
+    })
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_visual_duration")["passed"] is True
+
+
+def test_scene_visual_duration_still_fails_a_non_comparison_scene_with_no_states_over_cap(tmp_path):
+    """Confirms the check still catches an over-cap scene that (incorrectly) has no states list at all."""
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, {
+        "scene_id": "concept_1", "scene_type": "concept", "order": 1,
+        "start": 4.02, "end": 16.41, "duration": 12.39,
+        "narration_text": "text", "motion": {"type": "headline_reveal"},
+        "source_segment_indices": [1],
+    })
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_visual_duration")["passed"] is False
+    assert "concept_1" in _check(checks, "scene_visual_duration")["detail"]

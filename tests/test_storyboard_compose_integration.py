@@ -175,3 +175,50 @@ def test_compose_storyboard_video_with_multi_state_comparison_scene(tmp_path):
     checks = run_storyboard_qa_checks(storyboard, tmp_path, output_path)
     failed = [c for c in checks if not c["passed"] and c["check"] != "scene_structure"]
     assert not failed, failed
+
+
+@ffmpeg_required
+def test_compose_storyboard_video_with_a_generalized_long_non_comparison_scene(tmp_path):
+    """
+    Phase 3A end-to-end: a non-comparison scene (concept) whose real
+    duration exceeds its own QA cap, composed through the real ffmpeg
+    concat + per-segment zoompan path, confirming the real
+    ffprobe-measured duration matches the split-segment sum and every
+    QA check (including the now-generalized scene_visual_duration)
+    passes.
+    """
+    audio_path = tmp_path / "narration.mp3"
+    _make_synthetic_audio(audio_path, 6.2)
+
+    states = [
+        {"name": "segment_1", "duration": 3.1, "is_ramp": False, "zoom": 1.0},
+        {"name": "segment_2", "duration": 3.1, "is_ramp": False, "zoom": 1.03},
+    ]
+    total_duration = sum(s["duration"] for s in states)
+
+    storyboard = {
+        "version": 1, "story_id": 4, "title": "A Long Real Sentence About Clean Energy Adoption",
+        "taxonomy_category": "research", "source_name": "Example Source", "accent_color": [64, 156, 255],
+        "total_duration_seconds": total_duration,
+        "scenes": [
+            {
+                "scene_id": "concept_0", "scene_type": "concept", "order": 0,
+                "narration_text": "A long real sentence about clean energy adoption that runs past the usual concept-scene cap.",
+                "headline": "A long real sentence about clean energy…",
+                "start": 0.0, "end": total_duration, "duration": total_duration, "silent": False,
+                "motion": {"type": "headline_reveal", "states": states},
+                "source_segment_indices": [0],
+            },
+        ],
+    }
+
+    output_path = tmp_path / "story_video.mp4"
+    compose_storyboard_video(storyboard, _FakeContent(audio_path), tmp_path, output_path)
+
+    from app.content.video_composer import probe_video
+    probe = probe_video(output_path)
+    assert abs(probe["duration_seconds"] - total_duration) < 0.3
+
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, output_path)
+    failed = [c for c in checks if not c["passed"] and c["check"] != "scene_structure"]
+    assert not failed, failed

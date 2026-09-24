@@ -114,7 +114,7 @@ def render_scene_clip(scene: dict, storyboard: dict, scene_dir: Path, content_au
     duration = scene["duration"]
     motion = scene.get("motion") or {}
 
-    z, x, y = _zoompan_expr(motion)
+    default_z, default_x, default_y = _zoompan_expr(motion)
 
     command = ["ffmpeg", "-y"]
     scale_filters = []
@@ -138,6 +138,20 @@ def render_scene_clip(scene: dict, storyboard: dict, scene_dir: Path, content_au
         # flat scale-down); it's real now, applied uniformly across
         # every state since it's a constant (non-animated) zoom level,
         # so there's no discontinuity at a state boundary.
+        #
+        # A Phase 3A generalized long-scene segment (see
+        # scene_renderer.render_scene_frame_sequence /
+        # storyboard_generator._build_static_states) carries its own
+        # fixed per-segment "zoom" -- used INSTEAD of the scene-level
+        # motion here so consecutive segments of the same reused frame
+        # are never pixel-identical. Every other segment (including
+        # every existing comparison state, which never carries a
+        # "zoom" key) falls back to the scene-level motion exactly as
+        # before -- zero behavior change for anything but the new case.
+        if "zoom" in segment:
+            z, x, y = str(segment["zoom"]), "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+        else:
+            z, x, y = default_z, default_x, default_y
         scale_filters.append(
             f"[{index}:v]scale={SCENE_CANVAS},"
             f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={OUTPUT_W}x{OUTPUT_H}:fps={FPS},"

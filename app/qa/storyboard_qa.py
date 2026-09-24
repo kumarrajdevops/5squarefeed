@@ -2,6 +2,8 @@ from pathlib import Path
 
 from app.content import brand_assets
 from app.content.storyboard_generator import (
+    _comparison_header,
+    _derive_hero_kicker,
     _extract_progression_stages,
     _extract_stat_fields,
     _split_comparison,
@@ -156,15 +158,19 @@ def run_storyboard_qa_checks(storyboard: dict, scene_dir: Path, video_path: Path
     })
 
     # 8. No single unchanging visual state sits on screen longer than
-    # its per-scene-type cap -- for `comparison`, each named motion
-    # state is checked individually (the regression check for "long
-    # static hold after count-up").
+    # its per-scene-type cap. Any scene with a named motion.states list
+    # (comparison's own multi-state sequence, or -- Phase 3A -- a
+    # generalized long-scene split for any other scene type, see
+    # storyboard_generator._build_static_states) is checked per named
+    # state; a scene with no states list is checked as a whole (the
+    # regression check for "long static hold after count-up", now
+    # scene-type-agnostic rather than comparison-specific).
     duration_violations = []
     for scene in scenes:
         scene_type = scene["scene_type"]
         cap = _DURATION_CAPS.get(scene_type, 8.0)
-        if scene_type == "comparison":
-            states = (scene.get("motion") or {}).get("states") or [{"name": "whole_scene", "duration": scene["duration"]}]
+        states = (scene.get("motion") or {}).get("states")
+        if states:
             for state in states:
                 if state["duration"] > cap:
                     duration_violations.append(f"{scene['scene_id']}.{state['name']} ({state['duration']:.1f}s > {cap}s)")
@@ -237,10 +243,18 @@ def run_storyboard_qa_checks(storyboard: dict, scene_dir: Path, video_path: Path
 
     # 11. Provenance auditability (section 0's editorial-fidelity
     # principle): every scene records which real segment(s) it came
-    # from, and any generated progression is confirmed to have actually
-    # been derived from that scene's own real narration_text -- never
-    # backfilled/invented to satisfy the schema.
+    # from; any generated progression, hero kicker, or comparison
+    # header is confirmed to have actually been derived from real
+    # story data -- never backfilled/invented to satisfy the schema.
+    # The hero.kicker/comparison.header re-derivations are
+    # conditionally exercised: they only run when the storyboard's own
+    # top-level `title` field is present (real generation always sets
+    # it; a synthetic fixture that omits it simply isn't checked on
+    # this sub-rule -- the same conditionally-exercised philosophy
+    # already used above for stories with no comparison/statistic
+    # scene).
     fidelity_violations = []
+    title = storyboard.get("title")
     for scene in scenes:
         indices = scene.get("source_segment_indices")
         if indices is None:
@@ -253,6 +267,19 @@ def run_storyboard_qa_checks(storyboard: dict, scene_dir: Path, video_path: Path
             recomputed_stages = _extract_progression_stages(scene.get("narration_text") or "")
             if recomputed_stages != scene.get("stages"):
                 fidelity_violations.append(f"{scene['scene_id']}: stored stages don't match fresh re-derivation")
+
+        if title and scene["scene_type"] == "hero" and scene.get("kicker") is not None:
+            recomputed_kicker = _derive_hero_kicker(title)
+            if recomputed_kicker != scene.get("kicker"):
+                fidelity_violations.append(f"{scene['scene_id']}: stored kicker doesn't match fresh re-derivation")
+
+        if title and scene["scene_type"] == "comparison" and scene.get("header") is not None:
+            recomputed_header = _comparison_header(
+                title, scene.get("narration_text") or "",
+                scene.get("left") or {}, scene.get("right") or {},
+            )
+            if recomputed_header != scene.get("header"):
+                fidelity_violations.append(f"{scene['scene_id']}: stored header doesn't match fresh re-derivation")
     checks.append({
         "check": "source_fidelity",
         "passed": len(fidelity_violations) == 0,

@@ -543,12 +543,20 @@ def render_scene_frame_sequence(scene: dict, storyboard: dict, frame_dir: Path, 
       side counting up), a single static frame for every other state
       ("intro"/"both_context"/"hold"/the short-duration fallback's
       "reveal_both").
-    - Every other scene type (including `statistic`, and a comparison
-      scene that fell back to the original flat countup_seconds shape)
-      returns the SAME 1-or-2-segment shape this function always
-      returned before this change: a single static frame for no
-      count-up, or a ramp segment + one held-final-frame segment for
-      the remainder of the duration.
+    - A non-comparison scene whose real duration exceeded its own QA
+      cap at generation time (motion["states"] present, see
+      storyboard_generator._build_static_states) returns one segment
+      per state: the same real content rendered once (or ramped, if a
+      real count-up value exists) and reused across every static
+      segment, each carrying its own "zoom" for
+      storyboard_composer.py to apply -- never a new Pillow frame per
+      segment, just a different camera framing of the same frame.
+    - Every other scene type (including `statistic` under its cap, and
+      a comparison scene that fell back to the original flat
+      countup_seconds shape) returns the SAME 1-or-2-segment shape
+      this function always returned before this change: a single
+      static frame for no count-up, or a ramp segment + one
+      held-final-frame segment for the remainder of the duration.
 
     Baking the animation directly into Pillow frames -- rather than
     trying to have ffmpeg overlay animated text at a fixed pixel
@@ -586,6 +594,46 @@ def render_scene_frame_sequence(scene: dict, storyboard: dict, frame_dir: Path, 
 
     countup_seconds = motion.get("countup_seconds")
     total_duration = scene["duration"]
+
+    # A statistic scene with no real extracted value (visual_mode ==
+    # "headline") never counts up, regardless of what motion.type says
+    # -- explicit on the real data, not an implicit side effect of
+    # motion happening to omit countup_seconds.
+    if scene_type == "statistic" and scene.get("visual_mode") == "headline":
+        countup_seconds = None
+
+    if states:
+        # Phase 3A generalization: a non-comparison scene whose real
+        # duration exceeded its own QA cap at generation time (see
+        # storyboard_generator._build_static_states) -- same real
+        # content, rendered once (or, when a real count-up value
+        # exists, ramped exactly as the single-segment path below
+        # would) and reused across every static segment; only each
+        # segment's own duration and camera zoom (carried on the state
+        # dict, applied by app/content/storyboard_composer.py) differ,
+        # so consecutive segments are never pixel-identical.
+        segments = []
+        static_path = None
+        for state_def in states:
+            if state_def.get("is_ramp"):
+                renderer = _RENDERERS[scene_type]
+                frame_count = max(1, round(state_def["duration"] * fps))
+                ramp_paths = [frame_dir / f"frame_{i:05d}.png" for i in range(frame_count)]
+                for i, path in enumerate(ramp_paths):
+                    renderer(scene, storyboard, path, progress=(i + 1) / frame_count)
+                segments.append({
+                    "duration": state_def["duration"], "frame_paths": ramp_paths,
+                    "is_ramp": True, "zoom": state_def.get("zoom", 1.0),
+                })
+            else:
+                if static_path is None:
+                    static_path = frame_dir / "frame_static.png"
+                    render_scene_image(scene, storyboard, static_path)
+                segments.append({
+                    "duration": state_def["duration"], "frame_paths": [static_path],
+                    "is_ramp": False, "zoom": state_def.get("zoom", 1.0),
+                })
+        return segments
 
     if scene_type not in _COUNTUP_CAPABLE_TYPES or not countup_seconds:
         path = frame_dir / "frame_00000.png"

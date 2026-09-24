@@ -2,13 +2,21 @@ import json
 import types
 
 from app.content.storyboard_generator import (
+    HEADER_FILLER_PREFIX_RE,
     PROJECTED_DEPLOYMENT_HEADER,
+    SCENE_VISUAL_DURATION_CAPS,
     _build_comparison_motion_states,
+    _build_static_states,
     _comparison_header,
     _derive_comparison_header,
+    _derive_hero_kicker,
+    _extract_entity_field,
     _extract_progression_stages,
+    _extract_stat_fields,
     _infer_icon,
+    _shorten,
     _split_hold_states,
+    _split_static_hold,
     generate_storyboard,
 )
 
@@ -62,6 +70,11 @@ def test_story_51_real_content_produces_expected_scenes():
     )
 
     storyboard = generate_storyboard(item, state, content)
+
+    # The real story title is now persisted at the top level -- lets
+    # QA independently re-derive hero.kicker/comparison.header without
+    # re-querying the database (Master Storyboard Specification §6/§16).
+    assert storyboard["title"] == STORY_51_TITLE
 
     scene_types = [s["scene_type"] for s in storyboard["scenes"]]
     assert scene_types == ["hero", "key_fact", "comparison", "source_card"]
@@ -168,7 +181,35 @@ def test_statistic_branch_fires_for_a_lone_numeric_segment():
 
     storyboard = generate_storyboard(item, state, content)
 
-    assert "statistic" in [s["scene_type"] for s in storyboard["scenes"]]
+    statistic_scenes = [s for s in storyboard["scenes"] if s["scene_type"] == "statistic"]
+    assert len(statistic_scenes) == 1
+    # A real extractable value -> the count-up visual, not the plain
+    # headline fallback.
+    assert statistic_scenes[0]["visual_mode"] == "count_up"
+    assert statistic_scenes[0]["motion"]["type"] == "count_up"
+
+
+def test_statistic_scene_falls_back_to_headline_visual_mode_without_an_extractable_value():
+    """
+    A segment can carry a numeric SIGNAL (a bare year) strong enough to
+    classify as `statistic` without actually stating an extractable
+    VALUE (no million/billion/%/x/comma-grouped shape) -- this must
+    fall back to the plain headline visual_mode/motion, never a
+    count-up animation with nothing real to count up to.
+    """
+    segments = [
+        {"text": "Some intro sentence with no numbers here at all.", "start": 0.0, "end": 3.0},
+        {"text": "In 2024 the company shipped a completely redesigned interface.", "start": 3.0, "end": 6.0},
+    ]
+    item, state, content = _fake_story(caption_segments=segments, extracted_facts={}, audio_duration_seconds=6.0)
+
+    storyboard = generate_storyboard(item, state, content)
+
+    statistic_scenes = [s for s in storyboard["scenes"] if s["scene_type"] == "statistic"]
+    assert len(statistic_scenes) == 1
+    assert statistic_scenes[0]["stat"] is None
+    assert statistic_scenes[0]["visual_mode"] == "headline"
+    assert statistic_scenes[0]["motion"] == {"type": "headline_reveal"}
 
 
 def test_quote_branch_fires_for_a_quoted_segment():
@@ -357,3 +398,227 @@ def test_comparison_header_falls_back_to_title_truncation_without_the_real_deplo
 
     # Both sides have a date, but the narration never says "deploy".
     assert _comparison_header(title, narration, {"date": "2024"}, {"date": "2025"}) == _derive_comparison_header(title)
+
+
+def test_extract_stat_fields_recognizes_a_dollar_amount():
+    fields = _extract_stat_fields("The startup raised $50 million in its latest funding round.")
+    assert fields["stat"] == "$50"
+    assert fields["unit"] == "M"
+    assert fields["entity"] == "In its latest funding round."
+
+
+def test_extract_stat_fields_recognizes_a_percentage():
+    fields = _extract_stat_fields("Adoption grew 40% year over year among enterprise customers.")
+    assert fields["stat"] == "40"
+    assert fields["unit"] == "%"
+
+
+def test_extract_stat_fields_recognizes_a_multiplier():
+    fields = _extract_stat_fields("The new chip is 10x faster than its predecessor.")
+    assert fields["stat"] == "10"
+    assert fields["unit"] == "x"
+
+
+def test_extract_stat_fields_recognizes_an_already_comma_grouped_count():
+    fields = _extract_stat_fields("The platform now serves 1,234 enterprise customers worldwide.")
+    assert fields["stat"] == "1234"
+    assert fields["unit"] == ""
+
+
+def test_extract_stat_fields_never_matches_a_bare_year_as_a_value():
+    """
+    A bare 4-digit year (no comma grouping, no scale word, no $/%/x)
+    must never be mistaken for a statistic value -- it's a date, not a
+    count. Confirms the widened extraction doesn't introduce a false
+    positive the original million/billion/thousand-only match never had.
+    """
+    fields = _extract_stat_fields("In 2024 the company shipped a completely redesigned interface.")
+    assert fields["stat"] is None
+    assert fields["date"] == "2024"
+
+
+def test_extract_stat_fields_story_51_numeric_output_is_unchanged_by_the_widening():
+    """
+    Regression pin: Story #51's own real comparison clauses (plain
+    "<number> million" phrasing, no $/%/x/comma-grouping) must produce
+    byte-identical stat/unit output after widening _extract_stat_fields
+    -- the widening only ADDS new recognized shapes, it never changes
+    how the original shape is parsed.
+    """
+    left = _extract_stat_fields(
+        "By 2035, ABI Research projects an installed base of 49 million level 3-5 autonomous vehicles (AVs)"
+    )
+    right = _extract_stat_fields(
+        " Omdia estimates that roughly 60 million industrial robots will be deployed between 2026 and 2035."
+    )
+    assert (left["stat"], left["unit"]) == ("49", "M")
+    assert (right["stat"], right["unit"]) == ("60", "M")
+
+
+def test_hero_kicker_negation_guard_widens_the_cutoff_to_preserve_meaning():
+    """
+    Direct regression for the hero negation-truncation risk: a title
+    whose tight 5-word cutoff would silently drop a real negation word
+    ("Not") widens to the general 9-word cap instead -- still a strict
+    PREFIX of the same real words, never reordered or added.
+    """
+    title = "Company Announces Product That Does Not Work As Advertised"
+
+    kicker = _derive_hero_kicker(title)
+
+    assert "Not" in kicker
+    assert kicker.split() == title.split()  # no truncation needed once widened to 9 (title is exactly 9 words)
+
+
+def test_hero_kicker_negation_guard_does_not_widen_when_negation_is_already_within_the_tight_cutoff():
+    """
+    The guard only widens when the negation word would otherwise be
+    DROPPED -- if it already falls within the tight 5-word prefix,
+    the tight cutoff stays, matching the ordinary _derive_hero_kicker
+    behavior with no widening needed.
+    """
+    title = "Study Finds No Evidence Of Any Real Risk Here"
+
+    kicker = _derive_hero_kicker(title)
+
+    assert kicker == "Study Finds No Evidence Of…"
+
+
+def test_hero_kicker_negation_guard_never_reorders_or_adds_words():
+    """
+    No negation-guard case ever produces a word that isn't a real,
+    in-order prefix of the (filler-prefix-stripped) title -- proves
+    the guard only ever widens the cutoff, never reorders or invents.
+    """
+    for title in [
+        "Company Announces Product That Does Not Work As Advertised",
+        "Why Deploying Physical AI at Scale Demands Safety at Every Layer.",
+        "A Completely Ordinary Headline With No Negation At All In It",
+    ]:
+        kicker = _derive_hero_kicker(title)
+        kicker_words = kicker.rstrip("…").split()
+        source_words = HEADER_FILLER_PREFIX_RE.sub("", title.strip()).split()
+        assert kicker_words == source_words[:len(kicker_words)]
+
+
+# ---------------------------------------------------------------------
+# Phase 3A regression tests (Master Storyboard Specification, approved
+# after the 5-story validation surfaced these as real, demonstrated
+# findings -- not speculative additions).
+# ---------------------------------------------------------------------
+
+def test_shorten_abandons_a_too_short_comma_fragment_for_story_72s_real_title_shape():
+    """
+    Direct regression for the Phase 2 finding: Story #72's real title
+    ("In September, AI generated code has made up 17.25% of all Linux
+    Kernel patches") produced a near-content-free 2-word kicker ("In
+    September") because _shorten split on the first comma before
+    applying the word cap. The pre-comma fragment is too short (<=3
+    words) to be meaningful, so the cap now applies to the full text.
+    """
+    title = "In September, AI generated code has made up 17.25% of all Linux Kernel patches"
+
+    kicker = _derive_hero_kicker(title)  # max_words=5 by default
+
+    assert kicker != "In September"
+    assert "AI generated code" in kicker
+    # Still only ever a real, in-order PREFIX -- never reordered/added.
+    assert kicker.rstrip("…").split() == title.split()[:len(kicker.rstrip("…").split())]
+
+
+def test_shorten_still_uses_a_meaningful_comma_fragment_when_long_enough():
+    """
+    The guard only fires for a TOO-SHORT fragment -- a comma-separated
+    prefix with enough real words to stand on its own is kept exactly
+    as before (no regression to the original, working comma-split
+    behavior for a normal case).
+    """
+    text = "The company announced a major restructuring plan, cutting costs across every division."
+
+    shortened = _shorten(text, max_words=9)
+
+    assert shortened == "The company announced a major restructuring plan"
+
+
+def test_shorten_comma_guard_never_fires_when_there_is_no_comma_at_all():
+    text = "A completely ordinary sentence with no punctuation splitting it whatsoever today."
+    assert _shorten(text, max_words=9) == "A completely ordinary sentence with no punctuation splitting it…"
+
+
+def test_entity_stop_re_widening_fixes_story_72s_real_dangling_which():
+    """
+    Direct regression for the Phase 2 finding: Story #72's real
+    statistic clause produced entity="Code submissions to the Linux
+    Kernel which" (a dangling relative pronoun) because the original
+    stop set only had "were", positioned after "which" in the real
+    sentence. "which" now stops the entity extraction earlier.
+    """
+    entity = _extract_entity_field(" code submissions to the Linux Kernel which were written by AI.")
+    assert entity == "Code submissions to the Linux Kernel"
+    assert "which" not in entity.lower()
+
+
+def test_entity_stop_re_widening_fixes_story_41s_real_run_on_entity():
+    """
+    Direct regression for the Phase 2 finding: Story #41's real
+    statistic clause produced a long run-on entity ("To settle claims
+    that it failed to deliver an AI-upgraded Siri - and now") because
+    neither "that" nor a real dash-clause boundary stopped it early.
+    "that" now stops it immediately; the hyphen inside "AI-upgraded"
+    (no surrounding spaces) must NOT be mistaken for the same boundary.
+    """
+    entity = _extract_entity_field(
+        " to settle claims that it failed to deliver an AI-upgraded Siri - and now, "
+        "eligible iPhone owners can submit a claim for a payout."
+    )
+    assert entity == "To settle claims"
+    assert "that" not in entity.lower()
+
+
+def test_entity_stop_re_does_not_treat_a_hyphenated_compound_word_as_a_stop_boundary():
+    """A real hyphenated compound word (no surrounding spaces) is real source text and must survive intact."""
+    entity = _extract_entity_field(" an AI-upgraded assistant shipped today.")
+    assert "AI-upgraded" in entity
+
+
+def test_split_static_hold_stays_single_when_under_the_cap():
+    states = _split_static_hold(4.0, cap=6.0, name_prefix="segment")
+    assert states == [{"name": "segment_1", "duration": 4.0, "is_ramp": False, "zoom": 1.0}]
+
+
+def test_split_static_hold_splits_and_sums_exactly_with_distinct_zoom_per_segment():
+    states = _split_static_hold(12.39, cap=8.0, name_prefix="segment")
+    assert [s["name"] for s in states] == ["segment_1", "segment_2"]
+    assert all(s["duration"] <= 8.0 for s in states)
+    assert abs(sum(s["duration"] for s in states) - 12.39) < 1e-9
+    # Consecutive segments are never pixel-identical -- distinct zoom.
+    zooms = [s["zoom"] for s in states]
+    assert len(set(zooms)) == len(zooms)
+    assert all(1.0 <= z <= 1.12 for z in zooms)
+
+
+def test_build_static_states_preserves_the_real_countup_ramp_then_splits_the_remaining_hold():
+    """
+    A count-up-capable scene (e.g. statistic) whose duration exceeds
+    its cap keeps its existing real ramp UNCHANGED as the first state
+    -- only the static remainder is split. Direct regression for
+    Story #41's statistic_1 (9.84s, 8.0s cap, 1.2s real countup).
+    """
+    states = _build_static_states(duration=9.84, cap=8.0, countup_seconds=1.2)
+
+    assert states[0] == {"name": "reveal", "duration": 1.2, "is_ramp": True, "zoom": 1.0}
+    assert all(not s["is_ramp"] for s in states[1:])
+    assert abs(sum(s["duration"] for s in states) - 9.84) < 1e-9
+    assert all(s["duration"] <= 8.0 for s in states)
+
+
+def test_build_static_states_is_a_no_op_shape_under_the_cap():
+    """A scene already under its cap gets exactly one state at the base zoom -- confirms zero effect on passing scenes."""
+    states = _build_static_states(duration=4.02, cap=6.0, countup_seconds=None)
+    assert states == [{"name": "segment_1", "duration": 4.02, "is_ramp": False, "zoom": 1.0}]
+
+
+def test_scene_visual_duration_caps_cover_every_non_comparison_scene_type():
+    for scene_type in ("hero", "takeaway", "source_card", "quote", "concept", "company", "product", "key_fact", "statistic"):
+        assert scene_type in SCENE_VISUAL_DURATION_CAPS
+    assert "comparison" not in SCENE_VISUAL_DURATION_CAPS

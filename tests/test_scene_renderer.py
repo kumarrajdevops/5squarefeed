@@ -276,3 +276,83 @@ def test_logo_placement_uses_the_brand_assets_abstraction_not_a_hardcoded_path(t
     scene_renderer.render_scene_image(scene, _storyboard(), output_path)
 
     assert output_path.exists()
+
+
+# ---------------------------------------------------------------------
+# Phase 3A: generalized long-scene split (any non-comparison scene
+# whose real duration exceeded its own QA cap at generation time).
+# ---------------------------------------------------------------------
+
+def test_frame_sequence_generalized_split_reuses_one_static_frame_across_segments(tmp_path):
+    """
+    A non-comparison scene (e.g. concept) with a states list -- the
+    Phase 3A generalization -- renders its real content ONCE and
+    reuses that same file across every static segment; only each
+    segment's own duration/zoom differ. Direct regression shape for
+    Story #54's concept_1 (12.39s vs 8.0s cap).
+    """
+    scene = {
+        "scene_type": "concept",
+        "narration_text": "text",
+        "duration": 12.39,
+        "headline": "Clean energy isn't hard to come by",
+        "motion": {"type": "headline_reveal", "states": [
+            {"name": "segment_1", "duration": 6.195, "is_ramp": False, "zoom": 1.0},
+            {"name": "segment_2", "duration": 6.195, "is_ramp": False, "zoom": 1.03},
+        ]},
+    }
+    frame_dir = tmp_path / "frames"
+
+    segments = scene_renderer.render_scene_frame_sequence(scene, _storyboard(), frame_dir, fps=25)
+
+    assert len(segments) == 2
+    assert segments[0]["frame_paths"] == segments[1]["frame_paths"]  # same file reused, not re-rendered
+    assert segments[0]["zoom"] == 1.0
+    assert segments[1]["zoom"] == 1.03
+    assert abs(sum(s["duration"] for s in segments) - 12.39) < 1e-9
+    assert all(p.exists() for s in segments for p in s["frame_paths"])
+
+
+def test_frame_sequence_generalized_split_preserves_a_real_countup_ramp(tmp_path):
+    """
+    A count-up-capable scene (statistic) whose duration exceeds its
+    cap keeps its real ramp as a genuine Pillow frame sequence -- only
+    the static remainder reuses one frame across split segments.
+    Direct regression shape for Story #41's statistic_1 (9.84s, 8.0s
+    cap, 1.2s real countup).
+    """
+    scene = {
+        "scene_type": "statistic",
+        "narration_text": "text",
+        "duration": 9.84,
+        "stat": "250", "unit": "M", "entity": "Settlement",
+        "tier": None, "date": None, "source": None,
+        "visual_mode": "count_up",
+        "motion": {"type": "count_up", "countup_seconds": 1.2, "states": [
+            {"name": "reveal", "duration": 1.2, "is_ramp": True, "zoom": 1.0},
+            {"name": "hold_1", "duration": 4.32, "is_ramp": False, "zoom": 1.0},
+            {"name": "hold_2", "duration": 4.32, "is_ramp": False, "zoom": 1.03},
+        ]},
+    }
+    frame_dir = tmp_path / "frames"
+
+    segments = scene_renderer.render_scene_frame_sequence(scene, _storyboard(), frame_dir, fps=10)
+
+    assert segments[0]["is_ramp"] is True
+    assert len(segments[0]["frame_paths"]) == 12  # 1.2s at 10fps
+    assert segments[1]["is_ramp"] is False and segments[2]["is_ramp"] is False
+    assert segments[1]["frame_paths"] == segments[2]["frame_paths"]  # static portion reuses one file
+    assert segments[1]["zoom"] != segments[2]["zoom"]
+    assert abs(sum(s["duration"] for s in segments) - 9.84) < 1e-9
+
+
+def test_frame_sequence_without_states_is_unaffected_by_the_generalization(tmp_path):
+    """A scene under its cap (no states attached at generation time) renders exactly as before -- zero regression."""
+    scene = {"scene_type": "hero", "narration_text": "text", "duration": 3.0, "kicker": "A short kicker", "motion": {"type": "zoom_in", "max_zoom": 1.12}}
+    frame_dir = tmp_path / "frames"
+
+    segments = scene_renderer.render_scene_frame_sequence(scene, _storyboard(), frame_dir, fps=25)
+
+    assert len(segments) == 1
+    assert "zoom" not in segments[0]
+    assert segments[0]["duration"] == 3.0
