@@ -560,6 +560,12 @@ async function renderEpisodeList() {
         <p id="content-dedup-result" class="collect-result"></p>
         <p id="verify-result" class="collect-result"></p>
         <p id="rank-result" class="collect-result"></p>
+
+        <p class="collect-stage-label">Storyboard prototype (story 51 only -- see TODO.md):</p>
+        <div class="collect-row">
+          <button class="btn btn-small" id="storyboard-prototype-btn" type="button">Generate Storyboard Video</button>
+        </div>
+        <p id="storyboard-prototype-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -592,6 +598,17 @@ async function renderEpisodeList() {
         ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
         : `No new episode (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
       onSuccess: () => renderEpisodeList(),
+    });
+    wireStageButton({
+      btnId: "storyboard-prototype-btn", resultId: "storyboard-prototype-result",
+      path: "/dev/storyboard-prototype/51",   // hardcoded for this prototype phase only
+      formatResult: (r) => {
+        if (r.status === "failed") return `Failed (${escapeHtml(r.stage || "?")}): ${escapeHtml(r.error || "")}`;
+        const passed = (r.qa || []).filter((c) => c.passed).length;
+        return `${escapeHtml(r.status)} -- ${r.scene_count ?? "?"} scenes ` +
+          `(${(r.scene_types || []).join(" → ")}), ${passed}/${(r.qa || []).length} QA checks passed. ` +
+          `${escapeHtml(r.video_path || "")}`;
+      },
     });
   };
 

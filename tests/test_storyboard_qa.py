@@ -1,0 +1,233 @@
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from app.qa.storyboard_qa import run_storyboard_qa_checks
+
+
+ffmpeg_required = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+
+
+def _fake_storyboard():
+    # narration_text is intentionally omitted (None) on both scenes --
+    # checks 7/9/10 (which all key off narration_text) skip a scene
+    # that has none, exactly like a real silent source_card scene.
+    # source_segment_indices is set to a real-shaped value (non-empty
+    # for hero, empty for source_card, matching how the generator
+    # actually populates it) so check 11 passes without being the
+    # focus of these structure/timing/asset-focused tests.
+    return {
+        "total_duration_seconds": 10.0,
+        "scenes": [
+            {
+                "scene_id": "hero", "scene_type": "hero", "order": 0,
+                "start": 0.0, "end": 5.0, "duration": 5.0,
+                "narration_text": None, "source_segment_indices": [0],
+            },
+            {
+                "scene_id": "source_card", "scene_type": "source_card", "order": 1,
+                "start": 5.0, "end": 10.0, "duration": 5.0,
+                "narration_text": None, "source_segment_indices": [],
+            },
+        ],
+    }
+
+
+def _check(checks, name):
+    return next(c for c in checks if c["check"] == name)
+
+
+def test_scene_structure_passes_for_hero_first_source_card_last(tmp_path):
+    checks = run_storyboard_qa_checks(_fake_storyboard(), tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_structure")["passed"] is True
+
+
+def test_scene_structure_fails_when_last_scene_is_not_a_closer(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][-1]["scene_type"] = "comparison"
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_structure")["passed"] is False
+
+
+def test_scene_timing_contiguous_detects_a_gap(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][1]["start"] = 6.0  # gap between 5.0 and 6.0
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_timing_contiguous")["passed"] is False
+
+
+def test_scene_assets_present_fails_when_clip_files_missing(tmp_path):
+    checks = run_storyboard_qa_checks(_fake_storyboard(), tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_assets_present")["passed"] is False
+
+
+def test_scene_assets_present_passes_when_clip_files_exist(tmp_path):
+    storyboard = _fake_storyboard()
+    for scene in storyboard["scenes"]:
+        (tmp_path / f"scene_{scene['order']}_{scene['scene_id']}.mp4").write_bytes(b"fake video bytes")
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_assets_present")["passed"] is True
+
+
+def test_missing_video_file_fails_resolution_and_duration_checks(tmp_path):
+    checks = run_storyboard_qa_checks(_fake_storyboard(), tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "resolution_1080p")["passed"] is False
+    assert _check(checks, "audio_video_duration_match")["passed"] is False
+
+
+def test_brand_logo_present_reflects_the_real_placeholder_asset(tmp_path):
+    # The real placeholder asset genuinely exists in this repo --
+    # a real filesystem check, not a mock.
+    checks = run_storyboard_qa_checks(_fake_storyboard(), tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "brand_logo_present")["passed"] is True
+
+
+@ffmpeg_required
+def test_resolution_and_duration_checks_pass_for_a_real_1080p_video(tmp_path):
+    output_path = tmp_path / "real.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=25:d=2",
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=24000",
+            "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", "-t", "2",
+            str(output_path),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    storyboard = {"total_duration_seconds": 2.0, "scenes": []}
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, output_path)
+
+    assert _check(checks, "resolution_1080p")["passed"] is True
+    assert _check(checks, "audio_video_duration_match")["passed"] is True
+
+
+def _comparison_scene(**overrides):
+    scene = {
+        "scene_id": "comparison_2", "scene_type": "comparison", "order": 1,
+        "start": 0.0, "end": 14.2605, "duration": 14.2605,
+        "narration_text": (
+            "By 2035, ABI Research projects an installed base of 49 million level 3-5 "
+            "autonomous vehicles (AVs), while Omdia estimates that roughly 60 million "
+            "industrial robots will be deployed between 2026 and 2035."
+        ),
+        "left": {"stat": "49", "unit": "M", "entity": "Autonomous vehicles", "tier": "L3–L5", "date": "By 2035", "source": "ABI Research", "icon": "vehicle"},
+        "right": {"stat": "60", "unit": "M", "entity": "Industrial robots", "tier": None, "date": "2026–2035", "source": "Omdia", "icon": "robot"},
+        "motion": {"states": [
+            {"name": "intro", "duration": 1.6}, {"name": "reveal_left", "duration": 1.1},
+            {"name": "reveal_right", "duration": 1.1}, {"name": "both_context", "duration": 2.5},
+            {"name": "hold_1", "duration": 3.98}, {"name": "hold_2", "duration": 3.98},
+        ]},
+        "source_segment_indices": [2],
+    }
+    scene.update(overrides)
+    return scene
+
+
+def _key_fact_scene(**overrides):
+    scene = {
+        "scene_id": "key_fact_1", "scene_type": "key_fact", "order": 0,
+        "start": 0.0, "end": 4.625, "duration": 4.625,
+        "narration_text": "Physical AI is moving rapidly from research to large-scale deployment.",
+        "stages": ["RESEARCH", "LARGE-SCALE DEPLOYMENT"],
+        "source_segment_indices": [1],
+    }
+    scene.update(overrides)
+    return scene
+
+
+def test_text_duplication_passes_when_kicker_is_shorter_than_the_full_narration(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][0].update({
+        "narration_text": "Why Deploying Physical AI at Scale Demands Safety at Every Layer.",
+        "kicker": "Deploying Physical AI at Scale…",
+    })
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "text_duplication")["passed"] is True
+
+
+def test_text_duplication_fails_when_dominant_text_repeats_the_full_narration_verbatim(tmp_path):
+    storyboard = _fake_storyboard()
+    narration = "Why Deploying Physical AI at Scale Demands Safety at Every Layer."
+    storyboard["scenes"][0].update({"narration_text": narration, "kicker": narration})
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "text_duplication")["passed"] is False
+
+
+def test_scene_visual_duration_passes_when_every_state_is_under_the_cap(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _comparison_scene())
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_visual_duration")["passed"] is True
+
+
+def test_scene_visual_duration_fails_when_a_single_hold_state_exceeds_the_cap(tmp_path):
+    """Direct regression for the original "long static hold after count-up" bug."""
+    storyboard = _fake_storyboard()
+    broken_comparison = _comparison_scene()
+    broken_comparison["motion"]["states"] = [
+        {"name": "intro", "duration": 1.6}, {"name": "reveal_left", "duration": 1.1},
+        {"name": "reveal_right", "duration": 1.1}, {"name": "both_context", "duration": 2.5},
+        {"name": "hold", "duration": 7.96},  # never split -- exceeds the 5.0s comparison cap
+    ]
+    storyboard["scenes"].insert(1, broken_comparison)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "scene_visual_duration")["passed"] is False
+
+
+def test_numeric_integrity_passes_when_stored_fields_match_fresh_derivation(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _comparison_scene())
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "numeric_integrity")["passed"] is True
+
+
+def test_numeric_integrity_fails_when_a_stored_stat_was_hand_edited(tmp_path):
+    storyboard = _fake_storyboard()
+    tampered = _comparison_scene()
+    tampered["left"]["stat"] = "999"  # doesn't match the real narration_text anymore
+    storyboard["scenes"].insert(1, tampered)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "numeric_integrity")["passed"] is False
+
+
+def test_source_attribution_passes_when_entity_source_pairing_matches_the_real_narration(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _comparison_scene())
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_attribution")["passed"] is True
+
+
+def test_source_attribution_fails_when_a_source_drifts_onto_the_wrong_side(tmp_path):
+    storyboard = _fake_storyboard()
+    drifted = _comparison_scene()
+    drifted["left"]["source"] = "Omdia"  # ABI Research belongs with the vehicles side, not Omdia
+    storyboard["scenes"].insert(1, drifted)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_attribution")["passed"] is False
+
+
+def test_source_fidelity_passes_for_real_provenance_and_real_progression_stages(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _key_fact_scene())
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is True
+
+
+def test_source_fidelity_fails_when_source_segment_indices_is_missing(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][0].pop("source_segment_indices")
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is False
+
+
+def test_source_fidelity_fails_when_stages_were_hand_edited_beyond_what_the_narration_supports(tmp_path):
+    storyboard = _fake_storyboard()
+    tampered = _key_fact_scene()
+    tampered["stages"] = ["RESEARCH", "A FABRICATED MIDDLE STAGE", "LARGE-SCALE DEPLOYMENT"]
+    storyboard["scenes"].insert(1, tampered)
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "source_fidelity")["passed"] is False

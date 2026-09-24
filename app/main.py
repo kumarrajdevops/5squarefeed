@@ -29,6 +29,7 @@ from app.tasks.ranking import (
     run_ranking_selection,
 )
 from app.tasks.scheduled import run_daily_processing
+from app.tasks.storyboard_prototype import run_produce_storyboard_prototype
 from app.tasks.verification import run_verification
 from app.worker.celery_app import celery_app
 
@@ -341,6 +342,35 @@ def trigger_rank(episode_date: str | None = None):
 
     task = run_ranking_selection.delay(episode_date)
     return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/dev/storyboard-prototype/{story_id}")
+def trigger_storyboard_prototype(story_id: int):
+    """
+    DEV-only prototype: renders a multi-scene "storyboard" video for
+    ONE story (see app/tasks/storyboard_prototype.py) -- a deterministic
+    hero/statistic/comparison/etc. visual plan, real Ken-Burns motion,
+    a split-screen comparison card, and burned captions, instead of
+    today's single static title card. Completely separate from that
+    story's production video (media/videos/{story_id}.mp4, still
+    produced by POST /api/v1/stories/{id}/produce) -- writes to
+    media/videos/{story_id}_storyboard.mp4 and media/storyboard/
+    {story_id}/storyboard.json instead, and touches no database row.
+
+    Fully generic (any story_id with production content already
+    generated works) -- the dashboard's DEV button is what hardcodes
+    this to one specific story for this prototype phase, not this
+    endpoint.
+    """
+    _reject_if_not_dev()
+
+    with SessionLocal() as db:
+        item = db.get(NewsItem, story_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Story not found.")
+
+    task = run_produce_storyboard_prototype.delay(story_id)
+    return {"story_id": story_id, "task_id": task.id, "status": "queued"}
 
 
 @app.get("/api/v1/tasks/{task_id}/result")

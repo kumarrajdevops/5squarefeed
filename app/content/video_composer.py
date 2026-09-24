@@ -21,10 +21,13 @@ def get_audio_duration_seconds(audio_path: Path) -> float:
 
 def probe_video(video_path: Path) -> dict:
     """
-    Inspect a video file via ffprobe: total duration, and which stream
-    types are present. Used by app/qa/video_qa.py's video-integrity
-    check -- a real, independent check of the actual file, not just
-    trusting that composition/concatenation reported success.
+    Inspect a video file via ffprobe: total duration, which stream
+    types are present, and the video stream's pixel dimensions. Used
+    by app/qa/video_qa.py's video-integrity check -- a real,
+    independent check of the actual file, not just trusting that
+    composition/concatenation reported success. width/height are read
+    specifically from the stream where codec_type == "video" (an audio
+    stream has no width/height of its own).
     """
 
     result = subprocess.run(
@@ -32,7 +35,7 @@ def probe_video(video_path: Path) -> dict:
             "ffprobe",
             "-v", "error",
             "-show_entries", "format=duration",
-            "-show_entries", "stream=codec_type",
+            "-show_entries", "stream=codec_type,width,height",
             "-of", "json",
             str(video_path),
         ],
@@ -42,12 +45,16 @@ def probe_video(video_path: Path) -> dict:
     )
 
     data = json.loads(result.stdout)
-    codec_types = {stream.get("codec_type") for stream in data.get("streams", [])}
+    streams = data.get("streams", [])
+    codec_types = {stream.get("codec_type") for stream in streams}
+    video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
 
     return {
         "duration_seconds": float(data.get("format", {}).get("duration", 0.0)),
         "has_video": "video" in codec_types,
         "has_audio": "audio" in codec_types,
+        "width": video_stream.get("width") if video_stream else None,
+        "height": video_stream.get("height") if video_stream else None,
     }
 
 

@@ -19,6 +19,7 @@ celery_app = Celery(
         "app.tasks.episode_qa",
         "app.tasks.publishing",
         "app.tasks.scheduled",
+        "app.tasks.storyboard_prototype",
     ],
 )
 
