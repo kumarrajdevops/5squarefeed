@@ -5,7 +5,9 @@ from app.content.storyboard_generator import (
     HEADER_FILLER_PREFIX_RE,
     PROJECTED_DEPLOYMENT_HEADER,
     SCENE_VISUAL_DURATION_CAPS,
+    SEGMENT_MAX_ZOOM,
     _build_comparison_motion_states,
+    _build_narration_segments,
     _build_static_states,
     _comparison_header,
     _derive_comparison_header,
@@ -17,6 +19,7 @@ from app.content.storyboard_generator import (
     _shorten,
     _split_hold_states,
     _split_static_hold,
+    _zoom_for_segment_index,
     generate_storyboard,
 )
 
@@ -127,6 +130,11 @@ def test_story_51_real_content_produces_expected_scenes():
     hero = storyboard["scenes"][0]
     assert hero["kicker"] == "Deploying Physical AI at Scale…"
     assert hero["source_segment_indices"] == [0]
+    # A non-merged scene (#51's hero is a single real segment) gets a
+    # trivial 1-entry narration_segments list -- a strict no-op shape.
+    assert hero["narration_segments"] == [
+        {"text": STORY_51_SEGMENTS[0]["text"], "start": 0.0, "end": hero["duration"]}
+    ]
 
     key_fact = storyboard["scenes"][1]
     assert key_fact["stages"] == ["RESEARCH", "LARGE-SCALE DEPLOYMENT"]
@@ -138,6 +146,7 @@ def test_story_51_real_content_produces_expected_scenes():
     assert source_card["closing_line"] == "Full story: NVIDIA Blog"
     assert source_card["silent"] is True
     assert source_card["source_segment_indices"] == []
+    assert source_card["narration_segments"] == []
 
 
 def test_generator_does_not_special_case_any_story_id():
@@ -622,3 +631,89 @@ def test_scene_visual_duration_caps_cover_every_non_comparison_scene_type():
     for scene_type in ("hero", "takeaway", "source_card", "quote", "concept", "company", "product", "key_fact", "statistic"):
         assert scene_type in SCENE_VISUAL_DURATION_CAPS
     assert "comparison" not in SCENE_VISUAL_DURATION_CAPS
+
+
+# ---------------------------------------------------------------------
+# Phase 3B: narration_segments (real per-sentence caption timing) and
+# zoom oscillation (fixes the Broader Validation's confirmed caption-
+# overflow and zoom-saturation findings).
+# ---------------------------------------------------------------------
+
+def test_build_narration_segments_is_a_trivial_single_entry_for_a_non_merged_scene():
+    entries = _build_narration_segments(["A single real sentence."], [(4.5, 9.2)], duration=4.7)
+    assert entries == [{"text": "A single real sentence.", "start": 0.0, "end": 4.7}]
+
+
+def test_build_narration_segments_preserves_real_per_sentence_timing_for_a_merged_scene():
+    """
+    Direct regression shape for Story #52's real merged hero scene:
+    two real segments (their own real edge-tts start/end) merge into
+    one scene -- the FIRST entry is pinned to 0.0 and the LAST entry
+    is pinned to the scene's own real duration (matching the scene's
+    own authoritative boundaries, which can differ from a raw
+    segment's own start/end by a tiny real rounding amount), but each
+    entry's own real text/relative timing is otherwise preserved
+    exactly -- never re-derived or estimated.
+    """
+    seg_texts = ["First real sentence.", "Second real sentence."]
+    seg_real_times = [(5.44, 19.44), (19.44, 25.54)]  # real edge-tts start/end
+    duration = 20.0  # the scene's own authoritative duration (tiny rounding vs. raw 25.54-5.44=20.10)
+
+    entries = _build_narration_segments(seg_texts, seg_real_times, duration)
+
+    assert entries[0] == {"text": "First real sentence.", "start": 0.0, "end": 19.44 - 5.44}
+    assert entries[1]["text"] == "Second real sentence."
+    assert entries[1]["start"] == 19.44 - 5.44
+    assert entries[1]["end"] == duration  # pinned to the scene's own real end, not the raw segment's
+
+
+def test_generate_storyboard_threads_real_narration_segments_through_a_merged_hero_scene():
+    """
+    End-to-end confirmation (not just the helper in isolation): a real
+    multi-segment hero merge produces a scene whose narration_segments
+    has one real entry per merged segment, in order, covering the
+    scene's own real duration exactly.
+    """
+    segments = [
+        {"text": "Opening real sentence for the hero.", "start": 0.1, "end": 4.0},
+        {"text": "A second sentence that also stays hero.", "start": 3.95, "end": 8.0},
+        {"text": "A third sentence, also uneventful.", "start": 7.95, "end": 12.0},
+    ]
+    item, state, content = _fake_story(caption_segments=segments, extracted_facts={}, audio_duration_seconds=12.0)
+
+    storyboard = generate_storyboard(item, state, content)
+
+    hero = storyboard["scenes"][0]
+    assert hero["scene_type"] == "hero"
+    assert hero["source_segment_indices"] == [0, 1, 2]
+    entries = hero["narration_segments"]
+    assert len(entries) == 3
+    assert [e["text"] for e in entries] == [s["text"] for s in segments]
+    assert entries[0]["start"] == 0.0
+    assert abs(entries[-1]["end"] - hero["duration"]) < 1e-9
+    # Real internal timing preserved, not re-derived.
+    assert abs(entries[1]["start"] - (segments[1]["start"] - segments[0]["start"])) < 1e-9
+
+
+def test_zoom_for_segment_index_matches_the_original_monotonic_formula_below_the_cap():
+    """Byte-identical to the pre-Phase-3B monotonic formula for every index that doesn't reach the cap -- zero regression."""
+    for index in range(5):  # 0..4 reaches exactly SEGMENT_MAX_ZOOM at index 4
+        expected = min(1.0 + 0.03 * index, SEGMENT_MAX_ZOOM)
+        assert abs(_zoom_for_segment_index(index) - expected) < 1e-9
+
+
+def test_zoom_for_segment_index_oscillates_instead_of_flatlining_past_the_cap():
+    """
+    Direct regression for the Broader Validation's confirmed finding:
+    Story #19's 17-segment merged hero scene had 13 segments share the
+    identical clamped zoom=1.12. The new formula must never produce
+    two ADJACENT identical values, and must never exceed the existing
+    approved bound.
+    """
+    zooms = [_zoom_for_segment_index(i) for i in range(17)]
+    for a, b in zip(zooms, zooms[1:]):
+        assert a != b
+    assert all(1.0 <= z <= SEGMENT_MAX_ZOOM for z in zooms)
+    # Real story #19 shape: 13 of 17 segments (indices 4-16) previously
+    # shared the exact same clamped value -- confirm that's no longer true.
+    assert len(set(zooms[4:])) > 1

@@ -451,6 +451,31 @@ SEGMENT_ZOOM_STEP = 0.03
 SEGMENT_MAX_ZOOM = 1.12
 
 
+def _zoom_for_segment_index(index: int) -> float:
+    """
+    Master Storyboard Specification Phase 3B: a triangle-wave zoom
+    oscillation within the exact same already-approved bound
+    (1.0-SEGMENT_MAX_ZOOM) -- ramps up by SEGMENT_ZOOM_STEP per
+    segment same as before, then back down, repeating, instead of
+    clamping flat once the cap is reached (the Broader Validation's
+    confirmed finding: story #19's 17-segment merged hero scene had 13
+    segments share the identical clamped zoom=1.12). Every adjacent
+    pair of segments still differs by exactly one step -- the same
+    transition magnitude already used everywhere in this sequence,
+    never a new kind of visual jump, never a wider zoom range, no new
+    motion mechanism. Identical to the original monotonic formula for
+    every index that doesn't yet reach the cap (a strict,
+    backward-compatible generalization -- zero effect on any scene
+    needing 5 or fewer segments, which is every scene except #19 so
+    far).
+    """
+    steps_per_half_cycle = round((SEGMENT_MAX_ZOOM - 1.0) / SEGMENT_ZOOM_STEP)
+    period = steps_per_half_cycle * 2
+    position_in_cycle = index % period
+    step = position_in_cycle if position_in_cycle <= steps_per_half_cycle else period - position_in_cycle
+    return round(1.0 + SEGMENT_ZOOM_STEP * step, 6)
+
+
 def _split_static_hold(duration: float, cap: float, name_prefix: str) -> list[dict]:
     """
     Splits a single static-visual duration into one or more segments,
@@ -468,7 +493,7 @@ def _split_static_hold(duration: float, cap: float, name_prefix: str) -> list[di
             "name": f"{name_prefix}_{index + 1}",
             "duration": segment_duration,
             "is_ramp": False,
-            "zoom": min(1.0 + SEGMENT_ZOOM_STEP * index, SEGMENT_MAX_ZOOM),
+            "zoom": _zoom_for_segment_index(index),
         }
         for index in range(segment_count)
     ]
@@ -575,11 +600,39 @@ def _shorten(text: str, max_words: int = 9) -> str:
     return " ".join(words[:max_words]) + ("…" if len(words) > max_words else "")
 
 
+def _build_narration_segments(
+    seg_texts: list[str], seg_real_times: list[tuple[float, float]], duration: float,
+) -> list[dict]:
+    """
+    Real per-sentence timing (edge-tts's own SentenceBoundary
+    start/end, see app/content/voice_generator.py), relative to the
+    scene's own 0-based timeline -- never re-derived or estimated. The
+    FIRST entry always starts at exactly 0.0 and the LAST entry always
+    ends at exactly the scene's own `duration`, pinned to the scene's
+    own authoritative boundaries (the same pin already applied to the
+    scene's overall start/end, which can differ from a raw segment's
+    own start/end by a tiny real rounding amount) -- every entry in
+    between keeps its own real edge-tts timing completely unmodified.
+    A non-merged scene (the overwhelming majority) gets a trivial
+    single-entry list equal to today's narration_text/duration -- a
+    strict no-op, not a new estimate.
+    """
+    first_start = seg_real_times[0][0]
+    n = len(seg_texts)
+    entries = []
+    for index in range(n):
+        rel_start = 0.0 if index == 0 else seg_real_times[index][0] - first_start
+        rel_end = duration if index == n - 1 else seg_real_times[index][1] - first_start
+        entries.append({"text": seg_texts[index], "start": rel_start, "end": rel_end})
+    return entries
+
+
 def _build_scene(
     scene_type: str, extra, seg_texts: list[str], start: float, end: float, order: int,
-    title: str, source_segment_indices: list[int],
+    title: str, source_segment_indices: list[int], seg_real_times: list[tuple[float, float]],
 ) -> dict:
     narration_text = " ".join(seg_texts)
+    duration = end - start
     base = {
         "scene_id": f"{scene_type}_{order}",
         "scene_type": scene_type,
@@ -587,9 +640,10 @@ def _build_scene(
         "narration_text": narration_text,
         "start": start,
         "end": end,
-        "duration": end - start,
+        "duration": duration,
         "silent": False,
         "source_segment_indices": source_segment_indices,
+        "narration_segments": _build_narration_segments(seg_texts, seg_real_times, duration),
     }
 
     if scene_type == "hero":
@@ -658,10 +712,9 @@ def _build_scene(
     # unchanged, so this is a strict no-op everywhere it isn't needed.
     if scene_type != "comparison":
         cap = SCENE_VISUAL_DURATION_CAPS.get(scene_type, 8.0)
-        scene_duration = end - start
-        if scene_duration > cap:
+        if duration > cap:
             countup_seconds = base["motion"].get("countup_seconds")
-            base["motion"]["states"] = _build_static_states(scene_duration, cap, countup_seconds)
+            base["motion"]["states"] = _build_static_states(duration, cap, countup_seconds)
 
     return base
 
@@ -731,13 +784,19 @@ def generate_storyboard(item: NewsItem, state: StoryState, content: StoryContent
                 j += 1
 
             end = audio_duration if group_end_index == n - 1 else segments[group_end_index]["end"]
-            scenes.append(_build_scene("hero", None, group_texts, cursor, end, order, item.title, group_indices))
+            group_real_times = [(segments[idx]["start"], segments[idx]["end"]) for idx in group_indices]
+            scenes.append(_build_scene(
+                "hero", None, group_texts, cursor, end, order, item.title, group_indices, group_real_times,
+            ))
             cursor = end
             order += 1
             i = j
         else:
             end = audio_duration if i == n - 1 else segments[i]["end"]
-            scenes.append(_build_scene(scene_type, extra, [text], cursor, end, order, item.title, [i]))
+            scenes.append(_build_scene(
+                scene_type, extra, [text], cursor, end, order, item.title, [i],
+                [(segments[i]["start"], segments[i]["end"])],
+            ))
             cursor = end
             order += 1
             i += 1
@@ -756,6 +815,7 @@ def generate_storyboard(item: NewsItem, state: StoryState, content: StoryContent
             "duration": SOURCE_CARD_DURATION_SECONDS,
             "silent": True,
             "source_segment_indices": [],
+            "narration_segments": [],
             "closing_line": f"Full story: {item.source_name}",
             "motion": {"type": "static_hold"},
         })

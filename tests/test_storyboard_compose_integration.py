@@ -178,6 +178,72 @@ def test_compose_storyboard_video_with_multi_state_comparison_scene(tmp_path):
 
 
 @ffmpeg_required
+def test_compose_storyboard_video_with_a_long_merged_scene_gets_real_multi_cue_captions(tmp_path):
+    """
+    Phase 3B end-to-end: direct regression shape for Story #52 (a
+    19.44s merged hero scene that previously burned ONE unsplit
+    caption cue overlapping the source-attribution line). With real
+    narration_segments present, composing through the real ffmpeg
+    pipeline must produce a real .srt with multiple cues, each within
+    the deterministic budget, and every QA check (including the new
+    caption-safety checks) must pass.
+    """
+    audio_path = tmp_path / "narration.mp3"
+    _make_synthetic_audio(audio_path, 19.44)
+
+    narration_segments = [
+        {"text": "From Enablement to Execution, Egypt's AI Ecosystem Reaches Production Scale.", "start": 0.0, "end": 5.39},
+        {"text": "Today, Egypt's AI builders gathered for a reception that highlighted the ecosystem.", "start": 5.39, "end": 12.0},
+        {"text": "The event included a keynote from a senior NVIDIA executive.", "start": 12.0, "end": 19.44},
+    ]
+    narration_text = " ".join(s["text"] for s in narration_segments)
+
+    storyboard = {
+        "version": 1, "story_id": 6, "title": "From Enablement to Execution, Egypt's AI Ecosystem Reaches Production Scale",
+        "taxonomy_category": "major_news", "source_name": "Example Source", "accent_color": [220, 90, 90],
+        "total_duration_seconds": 19.44,
+        "scenes": [
+            {
+                "scene_id": "hero_0", "scene_type": "hero", "order": 0,
+                "narration_text": narration_text,
+                "narration_segments": narration_segments,
+                "kicker": "From Enablement to Execution",
+                "start": 0.0, "end": 19.44, "duration": 19.44, "silent": False,
+                # A real 19.44s hero also exceeds its own Phase 3A
+                # visual-duration cap (6.0s) -- this states list is
+                # exactly what _build_static_states would produce,
+                # included here so this test exercises the NEW caption
+                # logic without tripping the separately-already-tested
+                # Phase 3A visual-duration check.
+                "motion": {"type": "zoom_in", "max_zoom": 1.12, "states": [
+                    {"name": "segment_1", "duration": 4.86, "is_ramp": False, "zoom": 1.0},
+                    {"name": "segment_2", "duration": 4.86, "is_ramp": False, "zoom": 1.03},
+                    {"name": "segment_3", "duration": 4.86, "is_ramp": False, "zoom": 1.06},
+                    {"name": "segment_4", "duration": 4.86, "is_ramp": False, "zoom": 1.09},
+                ]},
+                "source_segment_indices": [0, 1, 2],
+            },
+        ],
+    }
+
+    output_path = tmp_path / "story_video.mp4"
+    compose_storyboard_video(storyboard, _FakeContent(audio_path), tmp_path, output_path)
+
+    from app.content.video_composer import probe_video
+    probe = probe_video(output_path)
+    assert abs(probe["duration_seconds"] - 19.44) < 0.3
+
+    srt_path = tmp_path / "scene_0_hero_0.srt"
+    srt_text = srt_path.read_text(encoding="utf-8")
+    cue_count = srt_text.count(" --> ")
+    assert cue_count >= 3, f"expected at least 3 real cues, got {cue_count}:\n{srt_text}"
+
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, output_path)
+    failed = [c for c in checks if not c["passed"] and c["check"] != "scene_structure"]
+    assert not failed, failed
+
+
+@ffmpeg_required
 def test_compose_storyboard_video_with_a_generalized_long_non_comparison_scene(tmp_path):
     """
     Phase 3A end-to-end: a non-comparison scene (concept) whose real

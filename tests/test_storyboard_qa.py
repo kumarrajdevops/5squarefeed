@@ -323,3 +323,103 @@ def test_scene_visual_duration_still_fails_a_non_comparison_scene_with_no_states
     checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
     assert _check(checks, "scene_visual_duration")["passed"] is False
     assert "concept_1" in _check(checks, "scene_visual_duration")["detail"]
+
+
+# ---------------------------------------------------------------------
+# Phase 3B: caption safety checks (12-15) -- direct regression checks
+# for the Broader Validation's confirmed caption-overflow finding
+# (Story #19's 97.4s single cue, Story #52's 19.44s single cue).
+# ---------------------------------------------------------------------
+
+def _well_segmented_scene(**overrides):
+    scene = {
+        "scene_id": "hero_0", "scene_type": "hero", "order": 0,
+        "start": 0.0, "end": 10.39, "duration": 10.39, "silent": False,
+        "narration_text": (
+            "From Enablement to Execution, Egypt's AI Ecosystem Reaches Production Scale. "
+            "Today, Egypt's AI builders gathered for a reception."
+        ),
+        "narration_segments": [
+            {"text": "From Enablement to Execution, Egypt's AI Ecosystem Reaches Production Scale.", "start": 0.0, "end": 5.39},
+            {"text": "Today, Egypt's AI builders gathered for a reception.", "start": 5.39, "end": 10.39},
+        ],
+        "source_segment_indices": [0, 1],
+    }
+    scene.update(overrides)
+    return scene
+
+
+def test_caption_safety_checks_all_pass_for_a_well_segmented_scene(tmp_path):
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _well_segmented_scene())
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "caption_cue_duration")["passed"] is True
+    assert _check(checks, "caption_cue_word_count")["passed"] is True
+    assert _check(checks, "caption_cue_line_count")["passed"] is True
+    assert _check(checks, "caption_segmentation_coverage")["passed"] is True
+
+
+def test_caption_cue_duration_fails_for_an_unsplittable_long_single_word_cue(tmp_path):
+    """A single real word spanning an unusually long real duration, with no clause marker to split at."""
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _well_segmented_scene(
+        narration_segments=[{"text": "Hello.", "start": 0.0, "end": 10.0}],
+        duration=10.0, end=10.0,
+    ))
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "caption_cue_duration")["passed"] is False
+
+
+def test_caption_cue_word_count_fails_for_a_dense_fast_cue(tmp_path):
+    """25 real words, no clause markers to split at, spoken in a short real duration -- duration passes, word count fails."""
+    text = (
+        "one two three four five six seven eight nine ten eleven twelve thirteen "
+        "fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo "
+        "twentythree twentyfour twentyfive"
+    )
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _well_segmented_scene(
+        narration_segments=[{"text": text, "start": 0.0, "end": 3.0}],
+        duration=3.0, end=3.0,
+    ))
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "caption_cue_duration")["passed"] is True
+    assert _check(checks, "caption_cue_word_count")["passed"] is False
+
+
+def test_caption_cue_line_count_fails_for_long_words_that_wrap_past_the_budget(tmp_path):
+    """Few real words (well under the word-count budget) that are individually long enough to wrap past 3 lines."""
+    text = "Internationalization implementations characteristically miscommunicated disproportionately counterproductively unconventionally"
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _well_segmented_scene(
+        narration_segments=[{"text": text, "start": 0.0, "end": 3.0}],
+        duration=3.0, end=3.0,
+    ))
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "caption_cue_word_count")["passed"] is True
+    assert _check(checks, "caption_cue_line_count")["passed"] is False
+
+
+def test_caption_segmentation_coverage_fails_when_a_long_scene_has_only_one_cue(tmp_path):
+    """
+    The scene's own real duration exceeds the cap but produced only
+    one cue -- the direct regression shape for Story #19/#52 before
+    the Phase 3B fix (a long merged scene with no real per-sentence
+    segmentation at all).
+    """
+    storyboard = _fake_storyboard()
+    storyboard["scenes"].insert(1, _well_segmented_scene(
+        duration=9.0, end=9.0,
+        narration_segments=[{"text": "Short real text.", "start": 0.0, "end": 3.0}],
+    ))
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    assert _check(checks, "caption_segmentation_coverage")["passed"] is False
+
+
+def test_caption_safety_checks_skip_silent_scenes(tmp_path):
+    """A silent scene (source_card/takeaway, no narration audio) is never caption-checked."""
+    storyboard = _fake_storyboard()
+    storyboard["scenes"][1]["silent"] = True
+    checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
+    for check_name in ("caption_cue_duration", "caption_cue_word_count", "caption_cue_line_count", "caption_segmentation_coverage"):
+        assert _check(checks, check_name)["passed"] is True

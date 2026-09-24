@@ -1,6 +1,13 @@
 from pathlib import Path
 
 from app.content import brand_assets
+from app.content.storyboard_composer import (
+    CAPTION_MAX_LINES,
+    MAX_CUE_DURATION_SECONDS,
+    MAX_WORDS_PER_CUE,
+    _caption_cues,
+    _wrap_caption_text,
+)
 from app.content.storyboard_generator import (
     _comparison_header,
     _derive_hero_kicker,
@@ -285,6 +292,75 @@ def run_storyboard_qa_checks(storyboard: dict, scene_dir: Path, video_path: Path
         "passed": len(fidelity_violations) == 0,
         "detail": "every visual element traces to a real source segment" if not fidelity_violations
         else f"issues: {fidelity_violations}",
+    })
+
+    # 12-15. Caption safety (Phase 3B -- the Broader Validation's
+    # confirmed caption-overflow finding). All four re-derive from the
+    # scene's own real narration_segments using the SAME cue-splitting
+    # functions app/content/storyboard_composer.py's real pipeline
+    # uses to actually burn captions -- never a separate estimate.
+    # "passed": False is a HARD FAILURE (a cue that would genuinely
+    # overflow the reserved caption region). A cue at or above 80% of
+    # a budget but still under it is noted in "detail" as a WARNING --
+    # it does not fail the check, matching this project's existing
+    # pass/fail check schema (no separate "level" field is introduced).
+    duration_violations, warning_durations = [], []
+    word_violations, warning_words = [], []
+    line_violations = []
+    coverage_violations = []
+
+    for scene in scenes:
+        if scene.get("silent"):
+            continue
+        cues = _caption_cues(scene)
+
+        if scene["duration"] > MAX_CUE_DURATION_SECONDS and len(cues) <= 1:
+            coverage_violations.append(f"{scene['scene_id']} ({scene['duration']:.1f}s, 1 cue)")
+
+        for index, cue in enumerate(cues):
+            cue_duration = cue["end"] - cue["start"]
+            cue_words = len(cue["text"].split())
+            cue_lines = len(_wrap_caption_text(cue["text"]).split("\n"))
+            label = f"{scene['scene_id']}.cue{index}"
+
+            if cue_duration > MAX_CUE_DURATION_SECONDS:
+                duration_violations.append(f"{label} ({cue_duration:.1f}s > {MAX_CUE_DURATION_SECONDS}s)")
+            elif cue_duration >= 0.8 * MAX_CUE_DURATION_SECONDS:
+                warning_durations.append(f"{label} ({cue_duration:.1f}s)")
+
+            if cue_words > MAX_WORDS_PER_CUE:
+                word_violations.append(f"{label} ({cue_words} words > {MAX_WORDS_PER_CUE})")
+            elif cue_words >= 0.8 * MAX_WORDS_PER_CUE:
+                warning_words.append(f"{label} ({cue_words} words)")
+
+            if cue_lines > CAPTION_MAX_LINES:
+                line_violations.append(f"{label} ({cue_lines} lines > {CAPTION_MAX_LINES})")
+
+    checks.append({
+        "check": "caption_cue_duration",
+        "passed": len(duration_violations) == 0,
+        "detail": "every cue is within the duration budget" if not duration_violations
+        else f"exceeded: {duration_violations}",
+        **({"warning": warning_durations} if warning_durations else {}),
+    })
+    checks.append({
+        "check": "caption_cue_word_count",
+        "passed": len(word_violations) == 0,
+        "detail": "every cue is within the word-count budget" if not word_violations
+        else f"exceeded: {word_violations}",
+        **({"warning": warning_words} if warning_words else {}),
+    })
+    checks.append({
+        "check": "caption_cue_line_count",
+        "passed": len(line_violations) == 0,
+        "detail": f"no cue wraps past {CAPTION_MAX_LINES} lines" if not line_violations
+        else f"exceeded: {line_violations}",
+    })
+    checks.append({
+        "check": "caption_segmentation_coverage",
+        "passed": len(coverage_violations) == 0,
+        "detail": "every long scene has real caption segmentation" if not coverage_violations
+        else f"under-segmented: {coverage_violations}",
     })
 
     return checks

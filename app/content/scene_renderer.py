@@ -119,7 +119,20 @@ def _draw_source_line(draw: ImageDraw.ImageDraw, source_name: str, y: int | None
     if not source_name:
         return
     font = ImageFont.truetype(FONT_REGULAR, 34)
-    draw.text((CONTENT_MARGIN_X, y if y is not None else CAPTION_SAFE_TOP - 60), f"Source: {source_name}", font=font, fill=SOURCE_COLOR)
+    # Phase 3B residual-caption follow-up: the original CAPTION_SAFE_TOP-60
+    # left only a ~45px gap to the reserved caption band, thin enough that
+    # a residual over-budget caption cue could touch this line. Measured
+    # directly against real rendered frames (pixel-brightness scan of a
+    # real 3-line residual cue, plus the worst-case hero-kicker geometry):
+    # the on-card dominant content's own worst case ends at ~510px (1080p)
+    # and a real caption cue's rendered top edge lands at ~670px (3 lines)
+    # / ~600px (4 lines) -- CAPTION_SAFE_TOP-410 centers this line in that
+    # gap with ~30px clearance on both sides for cues up to 4 lines. Taller
+    # residual cues (5+ lines, effectively only story #19's most extreme
+    # segments) already reach into the dominant-content zone regardless of
+    # where this line sits -- an accepted, documented limitation, not
+    # something this offset can fix without touching caption budgets.
+    draw.text((CONTENT_MARGIN_X, y if y is not None else CAPTION_SAFE_TOP - 410), f"Source: {source_name}", font=font, fill=SOURCE_COLOR)
 
 
 def _render_hero_scene(scene: dict, storyboard: dict, output_path: Path) -> None:
