@@ -604,9 +604,13 @@ async function renderEpisodeList() {
       path: "/dev/storyboard-prototype/51",   // hardcoded for this prototype phase only
       formatResult: (r) => {
         if (r.status === "failed") return `Failed (${escapeHtml(r.stage || "?")}): ${escapeHtml(r.error || "")}`;
-        const passed = (r.qa || []).filter((c) => c.passed).length;
+        const qa = r.qa || [];
+        const passed = qa.filter((c) => c.passed).length;
+        const qaText = r.reused
+          ? "storyboard reused, no new QA run"
+          : `${passed}/${qa.length} QA checks passed`;
         return `${escapeHtml(r.status)} -- ${r.scene_count ?? "?"} scenes ` +
-          `(${(r.scene_types || []).join(" → ")}), ${passed}/${(r.qa || []).length} QA checks passed. ` +
+          `(${(r.scene_types || []).join(" → ")}), ${qaText}. ` +
           `${escapeHtml(r.video_path || "")}`;
       },
     });
@@ -727,7 +731,7 @@ function renderStudioLayout(ep) {
           : ""}
       </div>
       <div class="studio-actions">
-        <button class="btn" id="btn-produce" type="button" ${producing ? "disabled" : ""}>${producing ? "Producing… 0:00" : "Produce"}</button>
+        <button class="btn" id="btn-produce" type="button" ${producing ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
         <button class="btn${qaStale ? " btn-warn" : ""}" id="btn-qa" type="button" ${producing ? "disabled" : ""}>${qaStale ? "Run QA ⚠ (stale)" : "Run QA"}</button>
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
@@ -827,16 +831,26 @@ function renderQAPanelHtml(ep) {
   return `<ol class="qa-list">${rows}</ol>`;
 }
 
-// Matches GAP_DURATION_SECONDS in app/tasks/episode_video.py -- a
-// silent 2s clip is inserted between consecutive *produced* story
-// segments in the combined video, so this offset calculation has to
-// count those gaps too or "jump to here" drifts out of sync later
-// into the episode, same class of bug as the AV-duration mismatch
-// that motivated adding the gaps in the first place.
-const STORY_GAP_SECONDS = 0.5;
+// Matches app/content/episode_renderer.py (the canonical enhanced-
+// Pillow renderer used by both build_episode.py and the production
+// Celery task) -- a 0.6s dark gap + SFX between consecutive *included*
+// story segments, so this offset calculation has to count those gaps
+// too or "jump to here" drifts out of sync later into the episode,
+// same class of bug as the AV-duration mismatch that motivated adding
+// the gaps in the first place.
+const STORY_GAP_SECONDS = 0.6;
+
+// Matches INTRO_DUR + GAP_DUR in episode_renderer.py -- a fixed 1.8s
+// branding card + 0.2s breathing gap before Story 1 begins, always.
+// Deliberately a constant, not a per-episode probe: the old
+// intro_duration_seconds field measured a legacy per-episode intro
+// clip file (media/videos/episode_{id}_intro.mp4) that the canonical
+// renderer never writes, so it's stale/absent for any episode produced
+// by it -- the new intro has no per-episode variation to probe.
+const INTRO_LEAD_IN_SECONDS = 2.0;
 
 function computeStartOffset(ep, targetStoryId) {
-  let offset = ep.intro_duration_seconds || 0;
+  let offset = INTRO_LEAD_IN_SECONDS;
   let addedFirst = false;
 
   for (const s of ep.primary) {
@@ -997,7 +1011,7 @@ function startProducePolling(ep, startTime) {
   produceBtn.disabled = true;
   if (qaBtn) qaBtn.disabled = true;
 
-  const tick = () => { produceBtn.textContent = `Producing… ${formatElapsed(Date.now() - startTime)}`; };
+  const tick = () => { produceBtn.textContent = `Processing… ${formatElapsed(Date.now() - startTime)}`; };
   tick();
   const timerInterval = setInterval(tick, 1000);
 
@@ -1082,10 +1096,10 @@ function wireHeaderButtons(ep) {
   document.getElementById("btn-produce").addEventListener("click", async () => {
     const startTime = Date.now();
     try {
-      await apiPost(`/episodes/${ep.episode_id}/produce`);
+      await apiPost(`/episodes/${ep.episode_id}/process`);
       startProducePolling(ep, startTime);
     } catch (err) {
-      alert("Failed to queue production: " + err.message);
+      alert("Failed to queue processing: " + err.message);
     }
   });
 

@@ -8,13 +8,11 @@ from app.content import brand_assets
 # Rendered natively at 2560x1440 (exactly 4/3 the pixel count of the
 # 1920x1080 final output, still 16:9) -- ffmpeg's zoompan/scale filter
 # (app/content/storyboard_composer.py) downsamples this for Ken-Burns
-# headroom without visible blur. app/content/visual_generator.py's
-# 1280x720 single-card path (used by every OTHER story's production
-# video) is completely untouched by this module.
+# headroom without visible blur.
 SCENE_WIDTH = 2560
 SCENE_HEIGHT = 1440
 
-# Same navy/text palette as visual_generator.py, at the new scale.
+# Same navy/text palette this project has always used for story cards.
 BACKGROUND_COLOR = (12, 16, 28)
 TEXT_COLOR = (240, 240, 245)
 SOURCE_COLOR = (150, 160, 180)
@@ -37,7 +35,7 @@ DEFAULT_ACCENT_COLOR = (64, 156, 255)
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
-    """Same word-wrap algorithm as app/content/visual_generator.py, at this module's scale."""
+    """Deterministic greedy word-wrap: add words while they fit max_width, else start a new line."""
     words = text.split()
     lines: list[str] = []
     current = ""

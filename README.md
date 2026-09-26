@@ -279,58 +279,81 @@ creates a second episode) and resets its `video_status`/`qa_status`
 back to `pending`. It's blocked the same way for approved/published
 episodes -- there is no override.
 
-## Producing content (script + voice + visual + video)
+## Producing content (canonical enhanced Pillow/storyboard renderer)
+
+There is ONE story-video renderer in the codebase --
+`render_story_enhanced()` (`app/content/episode_renderer.py`) --
+storyboard-driven scenes, real Ken-Burns motion, a light-icon
+watermark, real ASS captions (deterministic keyword emphasis,
+subordinate style during statistic scenes), a 0.32s dark scene-to-scene
+crossfade, no scene/story outro. Every story-production path below
+renders through it; none duplicates it.
 
 **Single story.** Pick a `story_id` (e.g. from `/api/v1/episodes/latest`)
-and kick off the full chain -- script generation, then voice synthesis,
-then the visual card, then video composition, each auto-chained into
-the next:
+and produce its own standalone enhanced video -- one task: ensure
+content/audio/captions, ensure a valid storyboard (reuse if
+valid/current, regenerate + QA if missing/stale), render, mux this
+story's own processed narration on top:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/stories/{story_id}/produce
 ```
 
 Poll for progress/results (`status` moves through `pending` ->
-`script_ready` -> `voice_ready` -> `visual_ready` -> `video_ready`,
-or `failed` -- see `error_message`):
+`script_ready` -> `voice_ready` -> `video_ready`, or `failed` -- see
+`error_message`; there is no separate `visual_ready` stage, unlike the
+old single-card renderer this replaced):
 
 ```bash
 curl http://localhost:8000/api/v1/stories/{story_id}/content
 ```
 
-**Full episode.** Produce (or reuse) content for every primary story
-in an episode and concatenate the results into one combined video, in
-rank order:
+`video_url` in that response points at
+`media/pillow_enhanced/{story_id}_pillow_enhanced.mp4`.
+`image_url`/`captions_url` are always `null` for a story produced this
+way -- no single title-card image, no separate downloadable `.srt`
+(captions are burned via ASS directly into the video).
+
+**Full episode.** Produce (or reuse) content + storyboard + enhanced
+video for every primary story in an episode, then assemble one combined
+episode video, in rank order:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/produce
+# or, the identical task under its clearer PROCESS-stage name:
+curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/process
 ```
 
-Idempotent -- stories that already have `video_ready` content are
-reused, not regenerated, so re-running after adding a few new stories
-only produces what's missing. Fault-isolated -- a story whose pipeline
-fails is skipped from the final video rather than blocking the whole
-episode. `video_status` flips to `"producing"` synchronously, before
-the endpoint even returns (closes a race where a poll landing before
-the background task starts could mistake "not started yet" for
-"already finished"). Poll `GET /api/v1/episodes/{episode_id}` for
-`video_status` (`pending` -> `producing` -> `ready`, or `failed`),
-`video_url`, and `video_produced_at`.
+Idempotent -- a story whose content/storyboard is already valid is
+reused, not regenerated. Unlike the old single-card renderer, this is
+**all-or-nothing at the content/storyboard prerequisite stage**: every
+selected story's content+storyboard is checked *before* any rendering
+begins, and a genuine failure for even one story stops the whole run
+with a clear error rather than silently excluding that story and
+continuing (a `qa_failed` storyboard is not fatal -- it still means a
+usable storyboard+video exist). `video_status` flips to `"producing"`
+synchronously, before the endpoint even returns (closes a race where a
+poll landing before the background task starts could mistake "not
+started yet" for "already finished"). Poll
+`GET /api/v1/episodes/{episode_id}` for `video_status`
+(`pending` -> `producing` -> `ready`, or `failed`), `video_url`, and
+`video_produced_at`.
 
-After the primary video is ready, the 5 backup stories are also
-produced (or reused), best-effort, as a second phase that can never
-delay or block the primary episode -- so a later dashboard swap
-(promoting a backup to primary) is instant instead of triggering a
-slow on-demand regeneration.
+After the primary video is ready, the 5 backup stories' content +
+storyboard are also ensured, best-effort, as a second phase that can
+never delay or block the primary episode -- so a later dashboard swap
+(promoting a backup to primary) reuses that work instead of triggering
+a slow on-demand regeneration. (Backups only pre-warm the storyboard
+prerequisite, not a full enhanced+audio-muxed clip -- that artifact
+isn't cached/reused across runs regardless, so there's nothing to gain
+from rendering it early.)
 
-Both endpoints' responses include playable URLs (served from `/media`,
-e.g. `http://localhost:8000/media/videos/{story_id}.mp4` or
-`.../videos/episode_{episode_id}.mp4`) for the generated audio, image,
-captions, and video. The combined episode video opens with a narrated
-intro card ("5squareFeed -- [date] -- 25 Stories A Day") and closes
-with a narrated outro ("That's all for today's 5squareFeed. See you
-tomorrow.") -- still a straight concatenation otherwise, no transitions
-or background music.
+The combined episode video opens with a light-surface branded intro
+card, has a short dark gap + SFX between every story, and closes with
+one silent branded outro card -- one continuous master audio track
+underneath (processed voice per story, a ducked ambient music bed,
+restrained SFX at the intro/story boundaries), not a per-clip narrated
+intro/outro the way the old renderer built one.
 
 **Automated Video QA.** Once an episode is produced, validate it
 against the architecture's QA checklist (story count, AI-only, source
@@ -342,16 +365,25 @@ curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/qa
 
 Poll `GET /api/v1/episodes/{episode_id}` for `qa_status`
 (`pending` -> `passed`/`failed`), `qa_report` (per-check pass/fail
-detail), and `qa_run_at`. `source_verification` still always reports
-as not implemented -- the Verification Engine now exists (see below),
-but this specific QA check hasn't been wired up to consume its data
-yet -- rather than faking a pass.
+detail), and `qa_run_at`. `source_verification` is wired to the
+Verification Engine's real per-story status (see below) -- not a
+placeholder. `captions_present` accepts either representation the
+codebase can produce: a standalone `.srt` on disk (the old renderer)
+or real per-sentence `caption_segments` (the enhanced renderer, which
+burns them directly and never writes a separate file) -- see `TODO.md`
+for the real bug this fixed (a perfectly-captioned enhanced story
+reporting `captions_present: false`). A story only counts toward these
+per-story checks once its `StoryContent.status` actually reaches
+`"video_ready"` -- also see `TODO.md` for a similar real bug this
+fixed (a story whose content pipeline stopped at `"voice_ready"` being
+silently excluded even though its enhanced segment was really in the
+produced video).
 
 A QA result is stale once the episode is reproduced afterward
 (`video_produced_at > qa_run_at`) -- the dashboard surfaces this as a
 warning on its Run QA button rather than the API enforcing it.
 
-All four stages are free/local, no API keys required:
+Every stage is free/local, no API keys required:
 
 - **Script** -- deterministic, template-based: headline + a
   deterministic summary of the story, nothing more (no editorializing
@@ -369,14 +401,28 @@ All four stages are free/local, no API keys required:
   candidates being compared for the final pick: `en-US-AriaNeural`,
   `en-US-JennyNeural`, `en-GB-RyanNeural` (see `TODO.md` for the full
   sample-comparison process across edge-tts's ~46 English voices).
-- **Visual** -- a branded title card rendered with Pillow.
-- **Video** -- ffmpeg composes the image + audio + burned-in captions
-  into an mp4, hard-capped to the real audio duration (`-t
-  <duration>`, not just `-shortest` -- see `TODO.md` for why that
-  matters). A silent 0.5s clip is inserted between consecutive stories
-  in the combined episode video for pacing. Captions are timed with
-  edge-tts's own real per-sentence timing (`SentenceBoundary` events
-  captured during synthesis), not an estimate -- see `TODO.md`.
+  Narration is further processed (highpass + gentle EQ lift +
+  compression + loudness normalization) before being placed into any
+  final mux -- the same one shared filter chain for every caller.
+- **Storyboard/Visual** -- a deterministic scene plan (hero/statistic/
+  comparison/etc.) rendered with Pillow: real Ken-Burns motion,
+  light-icon watermark, deterministic keyword-color caption emphasis,
+  subordinate caption style during statistic scenes.
+  `app/content/scene_renderer.py` + `app/content/storyboard_composer.py`
+  render the underlying scenes; `app/content/episode_renderer.py`'s
+  `render_story_enhanced()` is the one place that assembles them with
+  the scene-to-scene crossfade and watermark repaint.
+  `app/content/visual_generator.py`'s old single static title card is
+  gone -- removed once `/stories/{id}/produce` migrated onto this
+  renderer and its last caller disappeared (see `TODO.md`).
+- **Video** -- ffmpeg composes each scene, hard-capped to a real
+  measured duration (`-t <duration>` from a real ffprobe measurement,
+  not just `-shortest` -- see `TODO.md` for why that matters). A
+  0.32s dark crossfade joins consecutive scenes within one story; a
+  0.6s dark gap + SFX joins consecutive stories in a full episode.
+  Captions are timed with edge-tts's own real per-sentence timing
+  (`SentenceBoundary` events captured during synthesis), not an
+  estimate -- see `TODO.md`.
 
 ## Editorial Dashboard
 
@@ -431,9 +477,9 @@ not a generic browser tab.
   story's content status (verified = green, unverified = amber) with
   the reason as a tooltip. Soft signal only -- nothing is hidden or
   excluded, it's there so the editor can make an informed call.
-- **Produce / Run QA** -- both buttons disable and show a live
+- **Process Episode / Run QA** -- both buttons disable and show a live
   elapsed-time progress indicator while running, then auto-refresh
-  the view when done (Produce polls `video_status`, QA polls
+  the view when done ("Process Episode" polls `video_status`, QA polls
   `qa_run_at` against click time). Run QA shows an amber "stale"
   warning whenever the episode's been reproduced since QA last ran.
 - **Approve / Reject** -- sets the episode's overall status. Doesn't
@@ -691,22 +737,24 @@ docker exec 5squarefeed-api-1 pip install -r requirements-dev.txt
 docker exec -w /app 5squarefeed-api-1 pytest
 ```
 
-175 tests, no running Postgres required -- DB-backed tests use an
+300+ tests, no running Postgres required -- DB-backed tests use an
 in-memory SQLite database (`tests/conftest.py`'s `db_session` fixture;
 every model uses portable column types, so this is a faithful stand-in)
 rather than the real dev database. Covers the deterministic filters
 (AI-relevance, dedup, ranking, script generation, fact extraction,
-verification -- including the promo-sentence/truncation-marker fixes
-from an earlier session) plus direct regression tests for the three
-hardest-won bugs found in that session: the AV-duration desync (real
-ffmpeg, not mocked), the script-clobbering bug, and the ingestion race
-condition. Each regression test was
-verified to actually fail when its bug is reintroduced, not just pass
-tautologically.
-
-Not yet covered: the Celery task orchestration layer itself (e.g.
-`produce_episode_video`, `ingest_news` end to end) and the FastAPI
-endpoints -- see `TODO.md`.
+verification), the enhanced Pillow/storyboard renderer (scene
+rendering, storyboard generation/composition/QA, real ffmpeg
+end-to-end story renders gated on `ffmpeg` being installed), the
+Celery task orchestration layer (`produce_episode_video`,
+`produce_story_video_task`, `run_episode_qa`, episode
+select/reprocess), and the FastAPI endpoints for all of the above --
+plus direct regression tests for this project's hardest-won bugs (see
+`TODO.md` for the full list: AV-duration desync, script-clobbering,
+ingestion race, the Chrome-specific stream-copy stall, the missing-
+narration `asplit` bug, absolute- vs. relative-path storage, and the
+two QA-truthfulness bugs -- `video_ready` status and `captions_present`
+-- fixed most recently). Each regression test was verified to actually
+fail when its bug is reintroduced, not just pass tautologically.
 
 ## Stop / reset
 

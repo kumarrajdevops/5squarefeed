@@ -255,11 +255,11 @@ def _write_scene_captions(scene: dict, scene_dir: Path) -> Path:
     """
     Built via video_composer.py's build_captions() completely
     unmodified -- the scene's own real narration text/duration (from
-    edge-tts's own per-sentence timing, not re-derived), same
-    burned-subtitle idiom compose_video() already uses. Each cue's
-    text is deterministically pre-wrapped (see _wrap_caption_text)
-    before being written, so the resulting line count is exactly
-    known rather than left to libass's own unpinned auto-wrap guess.
+    edge-tts's own per-sentence timing, not re-derived), same .srt
+    format render_scene_clip below burns in. Each cue's text is
+    deterministically pre-wrapped (see _wrap_caption_text) before
+    being written, so the resulting line count is exactly known
+    rather than left to libass's own unpinned auto-wrap guess.
     """
     srt_path = scene_dir / f"scene_{scene['order']}_{scene['scene_id']}.srt"
     cues = [
@@ -288,9 +288,9 @@ def render_scene_clip(scene: dict, storyboard: dict, scene_dir: Path, content_au
     Composes one non-silent scene into a standalone, concat-compatible
     mp4: motion/visual-state sequence + burned captions + the real
     narration audio slice. Ends with an explicit `-t duration` hard
-    cap, replicating app/content/video_composer.py's compose_video()'s
-    documented, deliberate fix for a GOP/keyframe-overshoot audio/video
-    desync bug -- applied here per-scene instead of per-story.
+    cap -- this project's established, deliberate fix for ffmpeg's
+    `-shortest`-alone GOP/keyframe-overshoot audio/video desync bug
+    (see CLAUDE.md's hard rules), applied here per-scene.
 
     Loops over whatever render_scene_frame_sequence() returns -- one
     ffmpeg image-sequence/still input per segment, joined via ffmpeg's
@@ -382,8 +382,7 @@ def render_silent_scene_clip(scene: dict, storyboard: dict, scene_dir: Path, out
     """
     Same composition recipe as render_scene_clip, but for a silent
     scene (source_card/takeaway with no narration) -- anullsrc silence
-    instead of a narration slice, same profile generate_gap_clip()
-    already establishes (aac, 24kHz mono), no captions.
+    (aac, 24kHz mono) instead of a narration slice, no captions.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frames_dir = scene_dir / f"frames_{scene['order']}_{scene['scene_id']}"

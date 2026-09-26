@@ -89,52 +89,14 @@ def build_captions(segments: list[dict], output_path: Path) -> None:
             f.write(f"{segment['text']}\n\n")
 
 
-def generate_gap_clip(duration_seconds: float, output_path: Path) -> None:
-    """
-    A short silent black clip inserted between consecutive story
-    segments in the concatenated episode video (see
-    app/tasks/episode_video.py) -- a deliberate beat so one story's
-    narration doesn't run straight into the next, giving continuity/
-    sync a moment to visually and audibly reset between stories.
-
-    Generated directly via ffmpeg's lavfi color/anullsrc sources (no
-    image file needed) at the exact same codec/resolution/frame-rate/
-    audio profile compose_video() above produces (h264, 1280x720,
-    yuv420p, 25fps; aac, 24kHz mono) so it splices via concat_videos'
-    stream-copy concatenation without a mismatch.
-    """
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=black:s=1280x720:r=25:d={duration_seconds}",
-            "-f", "lavfi", "-i", f"anullsrc=channel_layout=mono:sample_rate=24000",
-            "-c:v", "libx264",
-            "-tune", "stillimage",
-            "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-t", str(duration_seconds),
-            str(output_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
 def concat_videos(video_paths: list[Path], output_path: Path) -> None:
     """
-    Concatenate multiple already-composed story videos into one, in
-    the given order, via ffmpeg's concat demuxer with stream copy (no
-    re-encoding -- fast and lossless, safe here because every story
-    video comes from the same compose_video() call above, so codec/
-    resolution/pixel format always match).
-
-    This is a straight concatenation only -- no intro/outro,
-    transitions, or episode-level branding. That's a separate,
-    not-yet-built piece of the architecture (see TODO.md).
+    Concatenate multiple already-composed videos into one, in the
+    given order, via ffmpeg's concat demuxer with stream copy (no
+    re-encoding -- fast and lossless, safe as long as every input
+    shares the same codec/resolution/pixel format). Used by
+    app/content/storyboard_composer.py to join a scene's frame-ramp
+    segments and multi-state comparison clips.
     """
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,55 +125,3 @@ def concat_videos(video_paths: list[Path], output_path: Path) -> None:
         )
     finally:
         list_path.unlink(missing_ok=True)
-
-
-def compose_video(
-    image_path: Path,
-    audio_path: Path,
-    captions_path: Path,
-    output_path: Path,
-    duration_seconds: float | None = None,
-) -> None:
-    """
-    Compose a static-image + narration-audio + burned-in-captions
-    video via ffmpeg. The image loops for the audio's duration.
-
-    `-shortest` alone is not precise here: combined with a looped
-    image input and the subtitles filter, the video stream has been
-    observed running 1-2+ seconds longer than the audio stream (e.g.
-    26.68s video vs. 24.55s audio on one real story) -- GOP/keyframe
-    flushing overshoot past where audio actually ends, not a rounding
-    error. Left uncorrected, that per-clip overshoot accumulates
-    additively once every story is concatenated into one episode video
-    (concat_videos() below), producing a large audio/video/caption
-    desync by the end of a 25+ story episode. Passing an explicit
-    `-t duration_seconds` hard-caps the output to the real audio
-    length regardless of keyframe alignment; `-shortest` is kept as a
-    secondary safeguard.
-    """
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    subtitles_filter = (
-        f"subtitles={captions_path}:force_style="
-        f"'FontName=DejaVu Sans,FontSize=20,PrimaryColour=&HFFFFFF&'"
-    )
-
-    command = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", str(image_path),
-        "-i", str(audio_path),
-        "-vf", subtitles_filter,
-        "-c:v", "libx264",
-        "-tune", "stillimage",
-        "-c:a", "aac", "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-shortest",
-    ]
-
-    if duration_seconds is not None:
-        command += ["-t", str(duration_seconds)]
-
-    command.append(str(output_path))
-
-    subprocess.run(command, check=True, capture_output=True, text=True)

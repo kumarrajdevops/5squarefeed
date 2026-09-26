@@ -10,7 +10,7 @@ def db_session():
     """
     A real SQLAlchemy session backed by an in-memory SQLite database,
     for testing functions that take `db` as an explicit parameter
-    (e.g. app.tasks.episode_video._produce_story_content) without
+    (e.g. app.content.storyboard_service.ensure_storyboard) without
     touching the real Postgres database.
 
     Deliberately not the app's own Postgres engine -- every model in

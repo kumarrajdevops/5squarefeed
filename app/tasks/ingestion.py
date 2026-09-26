@@ -91,8 +91,8 @@ def ingest_news(db, target_date) -> dict:
     _find_existing_news_item) has its collected_at refreshed rather
     than being inserted again.
 
-    Takes `db` explicitly (same split as app/tasks/episode_video.py's
-    _produce_story_content) so app/tasks/collection.py's orchestrator
+    Takes `db` explicitly (same split as app/content/storyboard_service.py's
+    ensure_storyboard) so app/tasks/collection.py's orchestrator
     can call this and app/tasks/ingestion_hackernews.py's HN
     equivalent within one shared session/CollectionRun row.
     """

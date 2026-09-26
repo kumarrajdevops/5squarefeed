@@ -37,10 +37,10 @@ Don't re-diagnose from scratch.
    via the dashboard's edit panel is expected to survive a later
    Produce. Any code that calls `generate_script()` (or reruns the
    script stage) must first check whether `content.script_text` already
-   exists and skip regeneration if so. (`_produce_story_content` in
-   `app/tasks/episode_video.py`, `generate_script_task` in
-   `app/tasks/content.py` — both guarded this way; keep new script-stage
-   code guarded the same way.)
+   exists and skip regeneration if so. (`ensure_script_and_voice` in
+   `app/tasks/content.py` — the one shared implementation every
+   production path uses, guarded this way; keep new script-stage code
+   guarded the same way.)
 
 2. **Any media file regenerated at a fixed URL must be cache-busted.**
    Episode/story videos are overwritten in place at the same URL every
@@ -66,10 +66,12 @@ Don't re-diagnose from scratch.
    GOP/keyframe flush behavior, not simple rounding) — harmless on one
    clip, but it accumulates additively once many clips are concatenated
    into one episode video, producing a large audio/video/caption desync
-   by the end. `compose_video()` in `app/content/video_composer.py`
-   takes an explicit `duration_seconds` for exactly this reason — pass
-   it whenever the audio duration is known at the call site (it always
-   is, via `get_audio_duration_seconds()`).
+   by the end. `render_scene_clip()` in `app/content/storyboard_composer.py`
+   and the final mux steps in `app/content/episode_renderer.py`
+   (`render_episode`/`render_story_standalone`) take an explicit
+   `-t <duration>` for exactly this reason, measured from a real ffprobe
+   duration rather than assumed — do the same in any new encode step
+   whenever the real duration is knowable at the call site.
 
 5. **If you add a pacing element to the concatenated video (gaps,
    transitions, intro/outro), update `computeStartOffset()` in
@@ -109,6 +111,27 @@ Don't re-diagnose from scratch.
    surfaces a second, related issue, report it and ask (or fix it only
    if clearly low-risk and directly in the spirit of what was asked) —
    don't just fix everything you notice in the same pass without saying so.
+
+10. **A QA/status check that reads "does artifact X exist" must be
+    updated whenever the thing that produces X changes.** Twice found
+    real, live in this project's data, not hypothetical: (a)
+    `app/tasks/episode_qa.py` filtered stories on
+    `StoryContent.status == "video_ready"`, but the enhanced renderer's
+    own content prerequisite (`ensure_script_and_voice`) only ever
+    reaches `"voice_ready"` — a story rendered fine but never marked
+    `video_ready` was silently excluded from per-story QA (fixed:
+    `episode_renderer._mark_story_video_ready`, called only after a
+    successful `render_story_enhanced()`). (b) `app/qa/video_qa.py`'s
+    `captions_present` check required `StoryContent.captions_path` to
+    exist on disk, but the enhanced renderer burns captions directly
+    from `caption_segments` and never writes a separate `.srt` — a
+    perfectly-captioned story reported `captions_present: false` (fixed:
+    `_has_real_captions()` accepts either real signal). When you change
+    what a pipeline stage actually produces, grep every consumer of the
+    field/status it used to set, not just the callers you already know
+    about — a QA check silently excluding good output looks identical
+    to "no bug," which is exactly why both of these went undetected
+    until specifically audited.
 
 ## Dev environment gotchas
 

@@ -257,9 +257,9 @@ def _run_ranking_selection(db, episode_date: date, now: datetime) -> dict:
     """
     The actual idempotent selection logic, taking `db` explicitly so it
     can be exercised directly in tests (same split as
-    app/tasks/episode_video.py's _produce_story_content/
-    produce_episode_video) rather than only through the Celery task,
-    which owns its own SessionLocal().
+    app/content/storyboard_service.py's ensure_storyboard/
+    app/tasks/episode_video.py's produce_episode_video) rather than only
+    through the Celery task, which owns its own SessionLocal().
 
     Idempotent per episode_date, enforced two ways
     (app/models.py's uq_editorial_episodes_episode_date is the final

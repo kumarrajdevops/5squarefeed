@@ -29,7 +29,7 @@ def run_daily_processing(target_date_iso: str | None = None) -> dict:
     not .delay() -- replaces the old auto-chain where each stage
     queued the next one itself) since each stage's output feeds
     the next and this task must genuinely wait for each to finish, same
-    rationale as _produce_story_content in app/tasks/episode_video.py.
+    rationale as ensure_script_and_voice in app/tasks/content.py.
     All five processing stages (classify/dedup/content_dedup/
     verification/ranking) share one db session so each stage's own
     commit() is the real transaction boundary -- an earlier stage's

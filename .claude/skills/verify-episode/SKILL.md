@@ -96,8 +96,9 @@ those stories that got reproduced, not everything.
 ## If something's off
 
 Don't just re-run and hope — this project's history is full of "looks
-fixed" turning out not to be. Isolate: test one story's `compose_video()`
-call directly in a Python one-liner inside the container before
-re-running a full (slow) episode regeneration, the same way the
-`-t`-duration fix was verified in this project before rolling it out
-episode-wide.
+fixed" turning out not to be. Isolate: test one story directly via
+`app.content.episode_renderer.render_story_standalone(story_id)` (or
+`render_story_enhanced()` for just the video/caption stage, no audio
+mux) in a Python one-liner inside the container before re-running a
+full (slow) episode regeneration, the same way the `-t`-duration fix
+was verified in this project before rolling it out episode-wide.

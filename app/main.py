@@ -10,13 +10,12 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from app.config import settings
-from app.content.video_composer import probe_video
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
 from app.models import CollectionRun, Episode, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
-from app.tasks.content import generate_script_task
+from app.tasks.content import produce_story_video_task
 from app.tasks.content_dedup import run_enrich_and_dedup_by_content
 from app.tasks.dedup import run_deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
@@ -347,15 +346,24 @@ def trigger_rank(episode_date: str | None = None):
 @app.post("/api/v1/dev/storyboard-prototype/{story_id}")
 def trigger_storyboard_prototype(story_id: int):
     """
-    DEV-only prototype: renders a multi-scene "storyboard" video for
-    ONE story (see app/tasks/storyboard_prototype.py) -- a deterministic
+    DEV-only: renders the SAME enhanced Pillow storyboard renderer used
+    by episode production (app/content/episode_renderer.py's
+    render_story_enhanced, via render_story_standalone -- see
+    app/tasks/storyboard_prototype.py) for exactly ONE story. Ensures
+    content/audio/captions and a valid storyboard first (generating/
+    regenerating only if missing or stale), then renders: deterministic
     hero/statistic/comparison/etc. visual plan, real Ken-Burns motion,
-    a split-screen comparison card, and burned captions, instead of
-    today's single static title card. Completely separate from that
-    story's production video (media/videos/{story_id}.mp4, still
-    produced by POST /api/v1/stories/{id}/produce) -- writes to
-    media/videos/{story_id}_storyboard.mp4 and media/storyboard/
-    {story_id}/storyboard.json instead, and touches no database row.
+    light-icon watermark, ASS captions, 0.32s scene-to-scene crossfade,
+    and this story's own processed narration muxed in. Completely
+    separate from that story's OLD production video (media/videos/
+    {story_id}.mp4, still produced by POST /api/v1/stories/{id}/produce
+    via the legacy generate_card/compose_video renderer) -- writes the
+    final enhanced video to media/pillow_enhanced/{story_id}_pillow_enhanced.mp4
+    and touches no database row beyond StoryContent (script/audio/
+    captions, if not already ready). The base media/storyboard/
+    {story_id}/storyboard.json and media/videos/{story_id}_storyboard.mp4
+    remain as the storyboard-QA pipeline's own intermediate artifacts,
+    not the endpoint's user-facing output.
 
     Fully generic (any story_id with production content already
     generated works) -- the dashboard's DEV button is what hardcodes
@@ -531,6 +539,22 @@ def trigger_episode_production(episode_id: int):
 
     task = produce_episode_video.delay(episode_id)
     return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/episodes/{episode_id}/process")
+def process_episode(episode_id: int):
+    """
+    Preferred semantic entry point for the PROCESS stage (COLLECT ->
+    SELECT -> PROCESS -> REVIEW -> PUBLISH): ensures content, audio,
+    storyboard, and per-story enhanced Pillow video for every primary
+    story, assembles the episode, mixes master audio, muxes, and runs
+    QA. This is the exact same task as /produce above (same queued
+    Celery job, same canonical renderer) -- deliberately not a second
+    implementation, just the clearer name for the "Process Episode"
+    dashboard button. Kept as a separate route (rather than replacing
+    /produce) to preserve existing callers/compatibility.
+    """
+    return trigger_episode_production(episode_id)
 
 
 @app.post("/api/v1/episodes/{episode_id}/qa")
@@ -995,19 +1019,6 @@ def _serialize_episode(db, episode: Episode) -> dict:
         else:
             backup.append(entry)
 
-    # Needed by the dashboard's "click a story, jump the player"
-    # feature -- the combined video starts with this clip before any
-    # story. Probed rather than stored, since intro clips are
-    # regenerated fresh on every /produce run (see
-    # app/tasks/episode_video.py) with no dedicated DB field.
-    intro_duration_seconds = None
-    intro_path = MEDIA_ROOT / "videos" / f"episode_{episode.id}_intro.mp4"
-    if intro_path.exists():
-        try:
-            intro_duration_seconds = probe_video(intro_path)["duration_seconds"]
-        except Exception:
-            pass
-
     return {
         "episode_id": episode.id,
         "episode_date": episode.episode_date,
@@ -1020,7 +1031,6 @@ def _serialize_episode(db, episode: Episode) -> dict:
         "video_url": f"/{episode.video_path}" if episode.video_path else None,
         "video_produced_at": episode.video_produced_at,
         "content_changed_at": episode.content_changed_at,
-        "intro_duration_seconds": intro_duration_seconds,
         "qa_status": episode.qa_status,
         "qa_report": json.loads(episode.qa_report) if episode.qa_report else None,
         "qa_run_at": episode.qa_run_at,
@@ -1084,14 +1094,16 @@ def list_stories(limit: int = 30):
 @app.post("/api/v1/stories/{story_id}/produce")
 def trigger_content_production(story_id: int):
     """
-    Kick off the full script -> voice -> visual -> video pipeline for
-    a single story (see app/tasks/content.py). Each stage chains into
-    the next via .delay(); poll GET /api/v1/stories/{id}/content for
-    progress.
-
-    Deliberately scoped to one story at a time for now -- this proves
-    out the architecture's Script/Voice/Visual/Video stages end to
-    end before wiring them up to run across an entire Top-25 episode.
+    Kick off the canonical enhanced Pillow story renderer for a single
+    story (see app/tasks/content.py's produce_story_video_task): ensure
+    content/audio/captions -> ensure a valid storyboard -> the SAME
+    render_story_enhanced() used inside every full episode and by the
+    DEV standalone endpoint -> mux this story's own processed narration
+    on top (app.content.episode_renderer.render_story_standalone). One
+    task, not a multi-stage chain -- the old script -> voice -> visual ->
+    video Celery chain (generate_card/compose_video) is gone. Poll
+    GET /api/v1/stories/{id}/content for progress; once status is
+    "video_ready", video_url points at the enhanced standalone MP4.
     """
     with SessionLocal() as db:
         item = db.get(NewsItem, story_id)
@@ -1099,7 +1111,7 @@ def trigger_content_production(story_id: int):
         if item is None:
             raise HTTPException(status_code=404, detail="Story not found.")
 
-    task = generate_script_task.delay(story_id)
+    task = produce_story_video_task.delay(story_id)
     return {"story_id": story_id, "task_id": task.id, "status": "queued"}
 
 
@@ -1107,10 +1119,17 @@ def trigger_content_production(story_id: int):
 def get_story_content(story_id: int):
     """
     Fetch the generated production artifacts for a story: script
-    text, and URLs for the audio/image/captions/video files once
-    each stage has completed. `status` tracks progress through the
-    pipeline (pending -> script_ready -> voice_ready -> visual_ready
-    -> video_ready, or failed -- see error_message).
+    text, and a URL for the enhanced standalone video once it's ready.
+    `status` tracks progress (pending -> script_ready -> voice_ready ->
+    video_ready, or failed -- see error_message). No separate
+    visual_ready stage anymore -- the enhanced Pillow/storyboard
+    renderer has no discrete single-image stage the old
+    generate_card/compose_video renderer had. image_url/captions_url
+    are always None for a story produced this way (no single title-
+    card image, no separate downloadable .srt -- captions are burned
+    via ASS inside the video itself); kept in the response shape only
+    for any pre-migration story whose fields were set by the old,
+    now-removed renderer.
     """
     with SessionLocal() as db:
         content = (
@@ -1155,10 +1174,13 @@ def update_story_content(story_id: int, body: StoryContentUpdate):
 
     Resets status to "script_ready" and clears the downstream
     audio/image/captions/video paths -- otherwise a stale video would
-    be silently reused by produce_episode_video's existing
-    `if content.status == "video_ready"` skip-check
-    (app/tasks/episode_video.py), leaving the edited script's audio/
-    video permanently out of sync with the text actually shown.
+    keep being served under this story's video_path/video_url,
+    leaving the edited script's audio/video permanently out of sync
+    with the text actually shown. Clearing script_text-dependent
+    fields (not script_text itself) is also what makes
+    ensure_script_and_voice's "skip regeneration if script_text is
+    already set" guard regenerate audio/captions FROM the edit rather
+    than reusing stale ones.
 
     Also flags any episode containing this story as QA-stale -- a
     story can appear in more than one episode (EpisodeStory is a

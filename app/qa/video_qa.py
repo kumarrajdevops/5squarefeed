@@ -1,7 +1,38 @@
+import json
 from pathlib import Path
 
 from app.content.video_composer import probe_video
 from app.tasks.ranking import PRIMARY_SLOTS
+
+
+def _has_real_captions(content) -> bool:
+    """
+    True if this story genuinely has real, timed captions ready --
+    either representation the codebase produces, not just a non-empty
+    string:
+
+    - `captions_path` + the file actually on disk: the OLD single-card
+      renderer's standalone .srt (app/tasks/content.py's now-removed
+      compose_video_task; still valid for any story produced before
+      this consolidation).
+    - `caption_segments` deserializing to a real, non-empty list: the
+      enhanced Pillow/storyboard renderer's own real per-sentence
+      timing (set by app.tasks.content.ensure_script_and_voice), which
+      it burns directly via an ASS filter (see
+      app.content.episode_renderer.caption_dialogue_line) -- there is
+      no separate .srt file for this path, and this project
+      deliberately does not create one just to satisfy this check (see
+      CLAUDE.md/TODO.md on this exact fix).
+    """
+    if content.captions_path and Path(content.captions_path).exists():
+        return True
+    if content.caption_segments:
+        try:
+            segments = json.loads(content.caption_segments)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(segments, list) and len(segments) > 0
+    return False
 
 
 # The project's own name ("5min-ai-news") and the architecture's own
@@ -76,16 +107,19 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
         ),
     })
 
-    # 5. Captions -- path recorded AND file actually exists on disk.
+    # 5. Captions -- real, timed captions exist for every story, via
+    # EITHER a standalone .srt on disk (the old renderer) or real
+    # per-sentence caption_segments (the enhanced renderer, burned
+    # directly -- no separate file). See _has_real_captions above.
     missing_captions = [
         item.id for _, item, _, content in story_rows
-        if not content.captions_path or not Path(content.captions_path).exists()
+        if not _has_real_captions(content)
     ]
     checks.append({
         "check": "captions_present",
         "passed": len(missing_captions) == 0,
         "detail": (
-            f"all {total} stories have caption files on disk" if not missing_captions
+            f"all {total} stories have real timed captions" if not missing_captions
             else f"{len(missing_captions)} stories missing captions: {missing_captions}"
         ),
     })

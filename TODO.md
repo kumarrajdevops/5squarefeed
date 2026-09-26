@@ -1988,6 +1988,340 @@ auto-blocking).
       existing files fixed for the model rename, 2 new files added --
       `test_raw_ingestion.py`, `test_processing_flow.py`).
 
+### This session — 2026-09-26, part 42 (Production Pipeline Consolidation -- storyboard everywhere + one canonical renderer)
+
+- [x] Made the validated enhanced storyboard/Pillow renderer (built as
+      an isolated scratchpad prototype in an earlier session, see
+      Story #51 frame-verification entries above) the ONE
+      episode-video-rendering implementation for both DEV and PROD.
+      New `app/content/episode_renderer.py`: `render_episode(episode_id)`,
+      the single entry point used identically by the new CLI
+      (`build_episode.py`, repo root) and by
+      `app/tasks/episode_video.py::produce_episode_video` (Celery/
+      production) -- neither duplicates any rendering logic.
+      Working-directory independent (`os.chdir(APP_ROOT)` at import
+      time, `APP_ROOT = Path(__file__).resolve().parents[2]`) --
+      verified by running the CLI from `/tmp`.
+- [x] New `app/content/storyboard_service.py`: `ensure_storyboard(db,
+      story_id)`, the ONE storyboard-generation implementation --
+      ensures content is ready (`ensure_script_and_voice`), reuses a
+      valid storyboard (`storyboard.json` mtime >= `StoryContent.
+      updated_at`) or regenerates + QAs one if missing/stale. Storyboard
+      generation is now an automatic, required prerequisite everywhere
+      (not just the old DEV-only endpoint) -- verified by deleting
+      storyboards for specific stories and confirming auto-regeneration
+      via the real production `/process` path, not a manually
+      pre-prepared fixture.
+- [x] New `POST /api/v1/episodes/{episode_id}/process` -- the exact
+      same task as `/produce` (`trigger_episode_production`), just the
+      clearer PROCESS-stage name for the dashboard's renamed
+      "Process Episode" button. Zero duplicate implementation.
+      `/produce` kept as-is for compatibility.
+- [x] Backup-story prewarming (the second phase of
+      `produce_episode_video`, after the primary video is ready)
+      migrated from the old per-story renderer onto the same
+      `ensure_storyboard` the primary path uses -- so a backup promoted
+      to primary later reuses exactly this artifact instead of
+      triggering a slow on-demand regeneration. Confirmed it does NOT
+      pre-render a full enhanced+audio clip for backups (that artifact
+      isn't cached/reused across runs regardless -- nothing to gain).
+- [x] **Bug found and fixed:** `episode.video_path`/`content.video_path`
+      were being stored as absolute paths by the new renderer --
+      `main.py`'s URL construction (`f"/{path}"`) silently produced an
+      invalid `//app/media/...` URL, so a "successfully produced"
+      episode showed no video in the browser. Root-caused via worker
+      logs (task actually succeeded) + browser DOM inspection (video
+      element never got a valid `src`). Fixed by storing
+      `final_out.relative_to(APP_ROOT).as_posix()` everywhere a video
+      path is persisted.
+- [x] **Bug found and fixed (twice):** a Chrome-specific playback stall
+      -- every backend check (ffprobe, curl range-requests, VLC)
+      passed, but a real `<video>` element (and a raw Chrome tab
+      navigation to the same URL) stalled at `readyState 0` forever.
+      Root-caused to `hard_cut_concat`'s stream-copy concatenation
+      (intro/gap/story/gap/.../outro) leaving subtle timestamp
+      irregularities Chrome's demuxer is stricter about than ffprobe/
+      curl/VLC. Ruled out the browser-automation environment itself
+      first (a known-good external test file also stalled at the same
+      moment, proving that specific test was invalid) before
+      re-verifying against a fresh, real render. Fixed by re-encoding
+      (not `-c:v copy`) at the final mux, `-fflags +genpts` +
+      `-movflags +faststart`, with no change to picture/audio content.
+- [x] **Bug found and fixed:** the master audio mix's `[voices]` label
+      was referenced by two downstream filters (the sidechain-duck
+      trigger and the final mix) without an explicit `asplit` --
+      isolating the `[voices]` bus alone and cross-correlating against
+      raw voice files showed 0.99 correlation early in the episode but
+      only ~0.2 by mid-episode (narration silently degrading, not
+      simply absent -- would NOT have been caught by only checking
+      "does an audio stream exist"). Fixed via
+      `[voices]asplit=2[voices_duck][voices_mix]`.
+- [x] **Bug found and fixed:** a statistic scene's count-up drew a
+      literal "0" one frame before its narration actually started
+      speaking the number -- fixed by gating the draw on `progress > 0`.
+- [x] **Bug found and fixed:** a scene's `pad` (extra duration needed so
+      the outer crossfade's offset math lines up with what's actually
+      encoded) was computed for bookkeeping but never threaded into the
+      real encode call -- found live on Episode 3's hero scene, which
+      was being truncated from ~3.6s to effectively nothing. Fixed by
+      passing `pad` into `encode_segments()`.
+- [x] **Bug found and fixed:** `_storyboard_is_valid`'s mtime-vs-
+      `updated_at` comparison raised on a naive datetime (SQLite test
+      backend returns naive `DateTime(timezone=True)` values, real
+      Postgres always returns aware ones) -- found via this session's
+      own new test, not live production, but fixed defensively
+      (`updated_at.replace(tzinfo=timezone.utc)` when naive) so the
+      check degrades safely instead of crashing on any future
+      SQLite-backed caller.
+- [x] **Bug found and fixed (dashboard):** `computeStartOffset()`
+      (`app.js` -- "click a story rank, jump the player") still summed
+      `STORY_GAP_SECONDS = 0.5` and read a per-episode
+      `ep.intro_duration_seconds` field measuring the OLD renderer's
+      intro clip file, which the new renderer never writes. Fixed:
+      `STORY_GAP_SECONDS = 0.6` (matches the new renderer's real
+      inter-story gap) and a fixed `INTRO_LEAD_IN_SECONDS = 2.0`
+      constant (the new intro has no per-episode variation to probe).
+      Validated cheaply -- without a redundant 10-minute 25-story
+      rerender -- by directly setting `episode.video_status` in the DB
+      to exercise the real polling/UI code paths, then restoring the
+      episode's exact original state afterward.
+- [x] Real end-to-end validation via the REAL production path (not a
+      manually pre-prepared fixture): Episode 2, starting from its
+      actual DB/artifact state, triggered through `/process`; dashboard
+      flow validated live (button disable/processing state/elapsed
+      timer/completion state/error display); final video inspected and
+      compared to the prior validated scratchpad output. Full `pytest`
+      suite passing throughout (see part 43 below for the exact count
+      after the follow-up dead-code removal).
+
+### This session — 2026-09-26, part 43 (dead-code removal -- confirmed-unused episode-rendering wrappers)
+
+- [x] Removed from `app/tasks/episode_video.py`, confirmed dead via
+      repository-wide grep (zero remaining callers): `_produce_story_content`,
+      `_produce_branding_clip`, `_get_gap_clip`, `GAP_CLIP_PATH`,
+      `GAP_DURATION_SECONDS`, plus 13 now-unused imports. File reduced
+      from ~262 to 140 lines.
+- [x] `app/tasks/storyboard_prototype.py` reduced from ~154 lines to a
+      thin wrapper re-exporting `storyboard_service.
+      produce_storyboard_prototype`.
+- [x] The 3 tests in `tests/test_produce_preserves_edited_script.py`
+      that called the now-removed `_produce_story_content` migrated to
+      call `app.tasks.content.ensure_script_and_voice` directly --
+      same exact behavioral guarantee (an edited script survives a
+      later Produce), only the call target changed.
+- [x] Stale comment references to the removed function fixed in
+      `app/tasks/ingestion.py`, `app/tasks/ranking.py`,
+      `app/tasks/scheduled.py`, `tests/conftest.py`.
+- [x] Confirmed explicitly NOT touched (out of scope, per explicit
+      instruction): `app/content/visual_generator.py::generate_card()`,
+      `app/content/video_composer.py::compose_video()`, their Celery
+      task wrappers in `app/tasks/content.py`, and
+      `POST /api/v1/stories/{id}/produce` -- all still the active,
+      unmigrated old single-card renderer at this point in the session
+      (see part 45 below for their eventual migration/removal). Full
+      `pytest` suite: 297 passing (3 new: the migrated edited-script
+      tests + a naive/aware datetime regression test).
+
+### This session — 2026-09-26, part 44 (unify standalone story rendering with the enhanced Pillow renderer)
+
+- [x] Found (via repository-wide caller audit, not assumption): the
+      standalone DEV endpoint (`POST /api/v1/dev/storyboard-prototype/
+      {story_id}`) still produced only the BASE storyboard video
+      (`storyboard_service.produce_storyboard_prototype` ->
+      `scene_renderer`/`storyboard_composer` directly) -- the enhanced
+      treatment (watermark repaint, ASS captions, scene-to-scene
+      crossfade) existed only inside full episode production
+      (`episode_renderer.py::build_story`, at this point still
+      episode-only).
+- [x] Renamed `build_story` -> `render_story_enhanced` and confirmed
+      (it already required no episode context -- only a story's own
+      valid storyboard) it can be called standalone with zero
+      duplication. Extracted `VOICE_CHAIN`/`process_story_voice()` as a
+      shared helper so the exact same narration-processing ffmpeg call
+      is used by both the episode master mix and a new standalone path,
+      not a second copy of the filter string.
+- [x] New `episode_renderer.render_story_standalone(story_id)`: ensure
+      content/audio/captions -> `ensure_storyboard` -> the same
+      `render_story_enhanced()` -> mux this story's own processed
+      narration on top -> one standalone enhanced story MP4
+      (`media/pillow_enhanced/{story_id}_pillow_enhanced.mp4`). The
+      base `{story_id}_storyboard.mp4` remains only as the storyboard-
+      QA pipeline's own intermediate artifact, never the endpoint's
+      user-facing output.
+- [x] `app/tasks/storyboard_prototype.py`'s DEV Celery task now calls
+      `render_story_standalone` -- same route, same request/response
+      shape, same task name; one deliberate behavior change: the
+      endpoint now reuses a valid storyboard instead of always
+      regenerating + QA-ing (unifies it with production; dashboard's
+      result text updated to say "storyboard reused, no new QA run"
+      instead of a confusing "0/0 passed").
+- [x] Real validation via the REAL `POST /api/v1/dev/storyboard-
+      prototype/51` (not simulated): `ffprobe` confirmed one video +
+      one audio stream, both exactly 23.56s; `volumedetect` confirmed
+      real narration (mean -19.8dB, max -4.5dB, not silence, no
+      clipping). Extracted a frame from the standalone output and the
+      corresponding offset inside Episode 2's already-produced video
+      (story 51 is primary there) -- pixel-identical: same watermark,
+      taxonomy badge, headline, source line, accent bar.
+      Full `pytest` suite: 299 passing (2 new -- an orchestration test
+      + a real ffmpeg+Pillow end-to-end standalone-render test).
+
+### This session — 2026-09-26, part 45 (migrate /stories/{id}/produce to the enhanced renderer + remove the now-dead legacy renderer)
+
+- [x] `POST /api/v1/stories/{story_id}/produce` migrated from the old
+      4-stage Celery chain (`generate_script_task` ->
+      `generate_voice_task` -> `generate_visual_task`
+      (`generate_card`) -> `compose_video_task` (`compose_video`)) onto
+      ONE task, `app/tasks/content.py::produce_story_video_task`, which
+      calls the exact same `episode_renderer.render_story_standalone`
+      the DEV endpoint and full episode production use. Endpoint
+      contract preserved (`{story_id, task_id, status: "queued"}`);
+      `StoryContent.status` progression is now `pending` ->
+      `script_ready` -> `voice_ready` -> `video_ready` (no separate
+      `visual_ready` stage -- the enhanced renderer has no discrete
+      single-image step).
+- [x] Repository-wide caller audit confirmed `generate_card()`,
+      `compose_video()`, `generate_visual_task`, `compose_video_task`,
+      `generate_script_task`, `generate_voice_task` all reached ZERO
+      remaining callers once this migration landed -- removed.
+      `app/content/visual_generator.py` deleted outright (its other
+      function, `generate_branding_card`, was already orphaned since
+      part 43's removal of `_produce_branding_clip` and had zero
+      callers of its own). `app/content/video_composer.py` trimmed
+      (`compose_video`/`generate_gap_clip` removed; `get_audio_
+      duration_seconds`/`probe_video`/`build_captions`/`concat_videos`
+      kept -- all still actively used by the storyboard pipeline and
+      QA modules).
+      `tests/test_video_composer_duration.py` removed (tested only the
+      two now-deleted functions).
+- [x] Fixed several stale docstrings/comments discovered during the
+      audit, all direct casualties of earlier removals in this session:
+      `app/tasks/content.py`'s `ensure_script_and_voice` docstring,
+      `GET /stories/{id}/content`'s status-progression docs, the PATCH
+      endpoint's stale reference to a `produce_episode_video` skip-
+      check that no longer exists, two `CLAUDE.md` hard rules
+      (`_produce_story_content`/`generate_script_task`/`compose_video()`
+      references), `.claude/skills/verify-episode/SKILL.md`'s debug
+      tip, and `scene_renderer.py`/`storyboard_composer.py`'s comments
+      pointing at the deleted functions.
+- [x] Also removed (found during the same audit, a direct casualty of
+      part 42's intro-clip removal, not touched at the time): a dead
+      `intro_duration_seconds` field in `GET /api/v1/episodes/{id}`
+      that probed `media/videos/episode_{id}_intro.mp4` -- a file the
+      new renderer never writes -- and was already confirmed unread by
+      the dashboard (see part 42's `computeStartOffset` fix).
+- [x] Confirmed `/stories/{id}/produce` was the ONLY remaining live
+      caller of the old renderer -- after this migration, no active
+      story/episode production path uses `generate_card`/`compose_video`
+      anywhere.
+- [x] Real validation via the REAL `POST /api/v1/stories/51/produce`:
+      `ffprobe` confirmed 1920x1080/25fps, both streams exactly 23.56s;
+      `volumedetect` confirmed real narration, no clipping.
+      `GET /stories/51/content` correctly shows `video_ready` and a
+      `video_url` pointing at the enhanced file. Since this endpoint
+      now calls the identical `render_story_standalone` already
+      pixel-validated in part 44, that visual-parity finding carries
+      over unchanged. Full `pytest` suite: 300 passing (4 new, 3
+      removed with the deleted test file).
+- [x] **Found, reported, deliberately NOT fixed in this pass** (flagged
+      per this file's own "don't silently expand scope" rule): a
+      story processed only through the new pipeline tops out at
+      `StoryContent.status == "voice_ready"`, but
+      `app/tasks/episode_qa.py` filters on `status == "video_ready"` --
+      silently excludes such a story from per-story QA even though its
+      enhanced segment is really in the produced episode. Latent, not
+      yet manifested live (every real story in the dev DB at the time
+      still carried leftover `video_ready` from before this
+      consolidation) -- fixed next, part 46.
+
+### This session — 2026-09-26, part 46 (QA-state consistency fix -- video_ready)
+
+- [x] Fixed the gap flagged at the end of part 45. New
+      `episode_renderer._mark_story_video_ready(db, story_id)`, called
+      only after `render_story_enhanced()` returns successfully inside
+      `render_episode()`'s own per-story loop (extracted as
+      `_render_and_mark_story` for direct unit-testability) -- sets
+      `StoryContent.video_path` (this story's own already-existing,
+      audio-complete `{story_id}_storyboard.mp4` -- NOT a new render;
+      that base storyboard video is a hard prerequisite guaranteed to
+      exist by this point) and `status = "video_ready"`. A failure
+      propagates unchanged (existing all-or-nothing episode-render
+      behavior); every earlier story's own commit in the same loop
+      survives a later story's failure.
+      `app/tasks/content.py::produce_story_video_task` (the standalone
+      `/stories/{id}/produce` path, part 45) already did this
+      correctly -- only the episode-embedded path had the gap.
+- [x] Audited all consumers of `StoryContent.video_path` --
+      `main.py`'s per-story `video_url` fields (episode story list +
+      `GET /stories/{id}/content`) and the PATCH endpoint's reset. None
+      require the enhanced+audio-muxed file specifically (generic
+      "preview this story" UI); `video_qa.py`'s QA checks never read
+      per-story `video_path` at all (confirmed via inspection). No
+      change made to `video_path` semantics beyond the fix above.
+- [x] 6 new focused tests (`tests/test_episode_renderer_video_ready.py`):
+      the DB write itself, render-then-mark ordering on success,
+      failure preserves the prior status untouched, an earlier story's
+      mark survives a later story's failure, the actual regression (a
+      story stuck at `voice_ready` now counts in `episode_qa.py`'s real
+      filter), and a sanity check proving the same story is excluded
+      WITHOUT the fix (confirms the regression test isn't vacuous).
+- [x] Real validation: `POST /api/v1/episodes/2/qa` re-run live (no
+      25-story rerender) -- `25/25 stories included`, `qa_status:
+      failed` only from the two pre-existing, already-documented
+      limitations (8 unverified sources, 400.4s exceeding the 5-min
+      target) -- no regression. Full `pytest` suite: 306 passing.
+- [x] **Found, reported, deliberately NOT fixed in this pass:**
+      `video_qa.py`'s `captions_present` check requires
+      `StoryContent.captions_path` to exist on disk -- the enhanced
+      renderer never writes one (captions are burned via ASS directly
+      from `caption_segments`). Once the status fix above made these
+      stories actually reach the check, a perfectly-captioned enhanced
+      story would report `captions_present: false`. Fixed next, part 47.
+
+### This session — 2026-09-26, part 47 (captions QA consistency fix)
+
+- [x] Audited every consumer of `StoryContent.captions_path`
+      (repository-wide grep): `video_qa.py`'s `captions_present` check
+      (the bug), `GET /stories/{id}/content`'s `captions_url` (already
+      correctly documented as always-null for an enhanced-only story,
+      part 45), and the PATCH endpoint's reset (unaffected). Determined
+      the check's real intent -- "does this story have real, timed
+      captions" -- is satisfied by either of two representations the
+      codebase actually produces: an old-renderer `.srt` on disk, or
+      the enhanced renderer's own real per-sentence `caption_segments`.
+- [x] New `video_qa._has_real_captions(content)`: true if
+      `captions_path` exists on disk (old renderer, unchanged) OR
+      `caption_segments` deserializes to a real, non-empty list (new
+      renderer) -- not just a truthy string (`json.dumps([])` is a
+      non-empty STRING but zero real captions). Deliberately did NOT
+      create a dummy `.srt` file to satisfy the old check -- no new
+      duplicate caption artifact.
+- [x] Also audited `StoryContent.video_path` consumers per explicit
+      request -- same conclusion as part 46 (no consumer requires the
+      enhanced-specific file); left unchanged.
+- [x] 9 new focused tests (`tests/test_video_qa_captions.py`):
+      `_has_real_captions` against both real signals, an empty
+      segments list, malformed JSON, a `captions_path` pointing at a
+      missing file, neither signal, both signals at once, plus two
+      `run_qa_checks`-level integration tests (passes for a pure
+      enhanced-pipeline story, fails for a story with neither signal).
+- [x] Real validation: produced a genuinely never-before-touched story
+      (#1, no prior `StoryContent` row at all) live via
+      `POST /api/v1/stories/1/produce` -- its real resulting row has
+      `captions_path: null`, `caption_segments` populated with 3 real
+      timed segments; confirmed live in the running container that
+      `_has_real_captions` correctly returns `True` against this exact
+      row (the precise scenario the old check got wrong). Re-ran
+      `POST /api/v1/episodes/2/qa` live -- unchanged `25/25` /
+      `qa_status: failed` (same two pre-existing limitations), now with
+      the updated truthful detail message. Full `pytest` suite: 315
+      passing.
+- [x] Added CLAUDE.md hard rule #10 generalizing both part-46 and
+      part-47 fixes: a QA/status check reading "does artifact X exist"
+      must be updated whenever the thing that produces X changes --
+      grep every consumer of a field/status before assuming a pipeline
+      change is complete.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -2076,19 +2410,29 @@ auto-blocking).
 ## Future phases (per `project.md`)
 
 Script/Voice/Visual/Video are now built in simplified/free form, at
-full-episode scale, with episode branding -- see parts 5-8 above.
-Noting here what's still genuinely missing from each, since the
-original `project.md` description was broader than what's built:
+full-episode scale, with episode branding -- see parts 5-8 above (the
+original single-card renderer these describe) and parts 42-45 above
+(the enhanced Pillow/storyboard renderer that replaced it as the ONE
+canonical implementation, everywhere). Noting here what's still
+genuinely missing from each, since the original `project.md`
+description was broader than what's built:
 
 - [~] Script Generation -- deterministic headline + summary only, no
       LLM/fact-extraction, no "why it matters" (deliberately removed
       per user direction), no explicit source citation in the spoken
       narration (source is shown on-screen in the visual card only).
-- [x] Voice Generation -- one branded AI voice (edge-tts), as designed.
-- [~] Visual/Asset Engine -- static branded title cards only. No avatar,
-      no screenshots, no motion graphics, no background music.
-- [~] Video Composition -- voice + visuals + captions + episode-level
-      branding (intro/outro) all working. No avatar, no transitions.
+- [x] Voice Generation -- one branded AI voice (edge-tts), further
+      processed (highpass/EQ/compression/loudness-normalized) before
+      any final mux, see "part 42" above.
+- [x] Visual/Asset Engine -- storyboard-driven scenes (hero/statistic/
+      comparison/etc.), real Ken-Burns motion, light-icon watermark,
+      deterministic keyword-color caption emphasis, see "part 42"/"part
+      44" above. Still no avatar, no screenshots.
+- [x] Video Composition -- voice + visuals + real ASS captions +
+      episode-level branding (intro/outro) + a 0.32s scene-to-scene
+      crossfade within a story + a 0.6s dark gap + SFX between stories
+      + a ducked ambient music bed, see "part 42" above. Still no
+      avatar.
 - [x] Automated Video QA -- 8 checks (story count, AI-only, source
       verification, source links, captions, audio, video integrity,
       duration), see "part 9" and "part 27" above. Soft signal only,
