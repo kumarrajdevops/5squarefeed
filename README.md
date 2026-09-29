@@ -443,9 +443,10 @@ v1 is deliberately lightweight: vanilla HTML/CSS/JS
 (`app/dashboard/`) served directly by FastAPI, no build step, no new
 dependencies. Partially click-tested in a real browser via
 `claude-in-chrome`; several real bugs (a Produce status race, stale
-cached video playback, an edit-clobbering bug -- see `TODO.md`) were
-only caught through actual live use once that browser connection
-dropped mid-session, not through automated verification alone.
+cached video playback, an edit-clobbering bug, a resumed Produce/
+Publish timer that reset to 0:00 on every reload instead of showing
+real elapsed time -- see `TODO.md`) were only caught through actual
+live use, not through automated verification alone.
 
 Carries the real 5squareFeed brand: favicon, apple-touch-icon, and a
 `site.webmanifest` (generated from the real logo -- see
@@ -459,6 +460,12 @@ not a generic browser tab.
 - **Watch the video** -- native player; click a story's rank number to
   jump playback to roughly that point (computed from intro + preceding
   stories' narration durations).
+- **See the full pipeline at a glance** -- a workflow chart (Collect ->
+  Classify -> Dedup -> Content-Dedup -> Verify -> Rank & Select ->
+  Produce -> QA -> Approve -> Publish) above the video, each stage's
+  real status/count for that episode's date, derived live from
+  existing data (no new schema). Complements, doesn't replace, the
+  per-stage buttons and header status pills.
 - **Reorder the Top 30** -- drag a story within Primary or Backup to
   re-rank it (native HTML5 drag-and-drop, no library).
 - **Swap in a backup** -- drag a Backup story onto a Primary slot to

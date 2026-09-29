@@ -133,6 +133,20 @@ Don't re-diagnose from scratch.
     to "no bug," which is exactly why both of these went undetected
     until specifically audited.
 
+11. **A UI timer that resumes across a page reload must anchor to a
+    real, persisted start timestamp — never to the moment of resuming.**
+    The dashboard's Produce/Publish buttons re-show "Processing…"/
+    "Publishing…" with a live elapsed timer when reopened mid-run, but
+    used `Date.now()` (the reload's own time) as the start, since no
+    real start time was ever persisted. Reported live by the user as
+    "clicking any episode triggers Produce" — it didn't (confirmed via
+    real network capture: only `GET`s fire, never a `POST`); a genuinely
+    still-running (or truly stuck) episode just reset to a fresh-looking
+    "0:00" on every reload, indistinguishable from a brand-new trigger.
+    Fixed via `Episode.video_started_at`/`publish_started_at`, set the
+    instant each stage actually starts. Any future resumable timer
+    needs the same real anchor, not `Date.now()` at resume time.
+
 ## Dev environment gotchas
 
 - The `worker` container does **not** hot-reload — Celery loads task
