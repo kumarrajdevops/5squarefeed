@@ -819,6 +819,7 @@ def trigger_episode_publish(episode_id: int):
             )
 
         episode.publish_status = "publishing"
+        episode.publish_started_at = datetime.now(timezone.utc)
         db.commit()
 
     task = publish_episode_to_youtube.delay(episode_id)
@@ -1147,11 +1148,13 @@ def _serialize_episode(db, episode: Episode) -> dict:
         "video_status": episode.video_status,
         "video_url": f"/{episode.video_path}" if episode.video_path else None,
         "video_produced_at": episode.video_produced_at,
+        "video_started_at": episode.video_started_at,
         "content_changed_at": episode.content_changed_at,
         "qa_status": episode.qa_status,
         "qa_report": json.loads(episode.qa_report) if episode.qa_report else None,
         "qa_run_at": episode.qa_run_at,
         "publish_status": episode.publish_status,
+        "publish_started_at": episode.publish_started_at,
         "youtube_url": episode.youtube_url,
         "published_at": episode.published_at,
         "publish_error": episode.publish_error,

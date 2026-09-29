@@ -38,6 +38,12 @@ def produce_episode_video(episode_id: int) -> dict:
             return {"episode_id": episode_id, "status": "failed", "error": "Episode not found"}
 
         episode.video_status = "producing"
+        # The one place this gets set that covers both the manual
+        # dashboard trigger (queued via app.main's endpoint) and the
+        # scheduled daily path (app.tasks.scheduled calls this task
+        # directly, bypassing that endpoint) -- see Episode.video_started_at's
+        # own docstring in app/models.py for why this exists.
+        episode.video_started_at = datetime.now(timezone.utc)
         db.commit()
 
     # Canonical enhanced Pillow/storyboard renderer -- the SAME

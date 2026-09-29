@@ -418,6 +418,7 @@ def _reprocess_episode(db, episode_id: int, now: datetime) -> dict:
 
     episode.status = "draft"
     episode.video_status = "pending"
+    episode.video_started_at = None
     episode.qa_status = "pending"
     episode.content_changed_at = now
 

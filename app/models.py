@@ -231,6 +231,20 @@ class Episode(Base):
 
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
+    # Set the moment video_status actually flips to "producing" (see
+    # app.tasks.episode_video.produce_episode_video -- the one place
+    # that covers both the manual dashboard trigger and the scheduled
+    # daily path, which calls that task directly, bypassing the API
+    # endpoint). NULL whenever video_status isn't "producing" --
+    # cleared back to NULL by ranking.py's reprocess alongside its own
+    # video_status="pending" reset. Exists so the dashboard's "resume
+    # the Processing… timer on page reload" can show REAL elapsed time
+    # instead of a fake "started just now" -- without this, a stuck
+    # episode (its task died mid-run, e.g. a worker restart/crash) was
+    # indistinguishable from one a user had just freshly triggered,
+    # which read as "clicking this episode triggers Produce" (a real
+    # bug report this fixes, not just a cosmetic one).
+    video_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     qa_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     qa_report: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -242,6 +256,12 @@ class Episode(Base):
     publish_status: Mapped[str] = mapped_column(
         String(50), default="not_published", nullable=False
     )
+    # Same rationale/pattern as video_started_at above, for the
+    # Publish button's resumed timer -- set synchronously in
+    # trigger_publish() (app/main.py), the only place publish_status
+    # ever becomes "publishing" (no scheduled/bypass path exists for
+    # publishing, unlike video production).
+    publish_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     youtube_video_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     youtube_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

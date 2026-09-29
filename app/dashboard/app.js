@@ -1144,14 +1144,19 @@ function wireHeaderButtons(ep) {
   });
 
   if (ep.video_status === "producing") {
-    // Page was loaded/reloaded mid-production -- resume the spinner.
-    // The elapsed timer starts counting from now (no true start time
-    // is persisted), so it's an approximation, not exact wall time.
-    startProducePolling(ep, Date.now());
+    // Page was loaded/reloaded mid-production -- resume the spinner
+    // from the REAL start time (Episode.video_started_at) so a
+    // genuinely stuck episode (its task died mid-run, e.g. a worker
+    // restart) shows real elapsed time and looks stuck, instead of
+    // resetting to 0:00 on every reload -- which read exactly like
+    // clicking the episode had just triggered a fresh Produce (a real
+    // bug report this fixed). Falls back to now() only for an episode
+    // produced before this field existed (video_started_at is NULL).
+    startProducePolling(ep, ep.video_started_at ? new Date(ep.video_started_at).getTime() : Date.now());
   }
 
   if (ep.publish_status === "publishing") {
-    startPublishPolling(ep, Date.now());
+    startPublishPolling(ep, ep.publish_started_at ? new Date(ep.publish_started_at).getTime() : Date.now());
   }
 
   document.getElementById("btn-publish").addEventListener("click", async () => {

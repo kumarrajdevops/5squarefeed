@@ -2479,6 +2479,55 @@ auto-blocking).
       the studio view (QA panel, story list) still renders correctly
       alongside it.
 
+### This session — 2026-09-29, part 51 (bug fix: episode click looked like it triggered Produce)
+
+- [x] **Real bug, reported by the user and reproduced live via Claude
+      in Chrome:** opening/reloading an episode whose video was
+      genuinely still producing showed the Produce button reset to
+      "Processing… 0:00" and start counting up again -- indistinguishable
+      from clicking having just triggered a fresh Produce. Confirmed via
+      real network-request capture that no POST fires on a row click or
+      page load (only GETs) -- this was never a rogue extra trigger, it
+      was `wireHeaderButtons`' "resume the timer on reload" logic using
+      `Date.now()` (the reload's own time) as the elapsed-timer's start,
+      because no real start time was ever persisted anywhere. The same
+      bug existed for the Publish button's "publishing…" resume.
+- [x] Fixed at the root: new `Episode.video_started_at` /
+      `publish_started_at` columns (migration `c1d4e8f92a67`, additive/
+      nullable, no backfill needed), set synchronously the moment each
+      stage actually starts (`produce_episode_video` -- the one place
+      that covers both the manual dashboard trigger and the scheduled
+      daily path, which calls it directly; `trigger_episode_publish` in
+      `app/main.py`), cleared back to `NULL` when `ranking.py`'s
+      reprocess resets a stale episode to `video_status="pending"`.
+      Dashboard now resumes the timer from the REAL start time, so a
+      genuinely long-running (or truly stuck) episode now honestly
+      shows real elapsed time instead of resetting to 0:00 -- exactly
+      the "at a glance, is this actually stuck" signal Rule #7
+      (verify against the live system) calls for, not a cosmetic tweak.
+- [x] 4 new focused tests (`tests/test_episode_started_at.py`):
+      `produce_episode_video` sets a real, current `video_started_at`;
+      `trigger_episode_publish` sets a real, current
+      `publish_started_at`; reprocess clears `video_started_at` back
+      to `NULL`; the serialized episode response exposes both fields.
+      Full `pytest` suite: 334 passing.
+- [x] Real validation: the episode the user was looking at (#5) turned
+      out to have finished normally moments after this investigation
+      started (`video_status` was genuinely "producing", not dead --
+      confirmed via `celery inspect active` showing zero running tasks
+      by the time it was checked, and the episode moved to "ready" on
+      its own) -- so the reported symptom was 100% explained by the
+      misleading-timer bug above, no stuck task/manual DB recovery was
+      needed. To prove the fix concretely without waiting ~10 minutes
+      for a real render, temporarily set a real, already-produced
+      episode's `video_status="producing"` with a `video_started_at`
+      5.5 minutes in the past, confirmed live in a real browser tab
+      that a hard-reload correctly showed "Processing… 5:41" (real
+      elapsed time, ticking up from there) rather than resetting to
+      0:00, then restored that episode's exact original state
+      (`video_status="ready"`, `video_started_at=NULL`,
+      `video_produced_at` untouched throughout).
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
