@@ -388,13 +388,18 @@ Every stage is free/local, no API keys required:
 - **Script** -- deterministic, template-based: headline + a
   deterministic summary of the story, nothing more (no editorializing
   or speculative "why it matters" commentary). Same pattern as the
-  AI-relevance/dedup filters. For Hacker News link-posts (HN's API has
-  no article content, only submission metadata), the summary is
-  fetched from the linked article's own `og:description`/`meta
-  description`/first paragraph (`app/sources/article_fetcher.py`)
-  rather than falling back to "N points, M comments on Hacker News."
-  Promotional/newsletter-pitch sentences ("subscribe", "sign up",
-  etc.) are filtered out of any summary before narration.
+  AI-relevance/dedup filters. Prefers the full scraped article body
+  (`NewsItem.raw_content`, already fetched by content-dedup's TF-IDF
+  pass -- `app/content/article_extractor.py`) over RSS's often thin/
+  truncated/promotional `raw_summary` when a fetch already succeeded;
+  falls back to `raw_summary` otherwise (script generation never
+  triggers a fetch of its own). For Hacker News link-posts (HN's API
+  has no article content, only submission metadata), the summary
+  falls further back to the linked article's own `og:description`/
+  `meta description`/first paragraph (`app/sources/article_fetcher.py`)
+  rather than "N points, M comments on Hacker News." Promotional/
+  newsletter-pitch sentences ("subscribe", "sign up", etc.) are
+  filtered out of any summary before narration.
 - **Voice** -- [edge-tts](https://github.com/rany2/edge-tts) (free
   Microsoft neural TTS, one branded voice for every story). Current
   voice: `en-US-GuyNeural`, still under review -- shortlisted

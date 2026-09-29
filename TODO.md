@@ -2322,6 +2322,84 @@ auto-blocking).
       grep every consumer of a field/status before assuming a pipeline
       change is complete.
 
+### This session — 2026-09-28, part 48 (full-article scraping as the real script source)
+
+- [x] Audited every consumer of `fetch_full_article_text`/`raw_content`
+      before writing any code: confirmed `raw.news_items.raw_content`
+      (full extracted article body) and `content_hash` already exist
+      and are already populated by `content_dedup.py`'s daily TF-IDF
+      pass; `editorial.stories.content_fetch_status` already tracks
+      `success`/`empty_extraction`/`fetch_error`/`non_html` (`NULL` =
+      never attempted). **No new migration needed** -- the gap was
+      purely that script generation never read this column.
+- [x] `app/content/script_generator.py::generate_script` now takes an
+      optional `raw_content` parameter and prefers it over
+      `raw_summary` when present (a non-empty value is already
+      guaranteed to have cleared `article_extractor.py`'s own
+      `MIN_CONTENT_CHARS` gate before being persisted, so no further
+      quality check was needed at the consuming end) -- falls back to
+      `raw_summary` exactly as before when a fetch never happened or
+      failed. Deliberately does NOT trigger its own fetch (stays
+      network-free/deterministic, as documented) and deliberately does
+      NOT change `MAX_SUMMARY_SENTENCES` (still 3, for both sources) --
+      the win is a better opening excerpt (the article's own real lede,
+      not RSS's often thin/truncated/promotional blurb), not a longer
+      video; both constraints confirmed with the user before
+      implementation. `app/tasks/content.py::ensure_script_and_voice`
+      (the one call site) now passes `story.raw_content` through; the
+      "never regenerate an existing/edited script" guard is untouched.
+- [x] **Real bug found and fixed live** (real full-article text
+      immediately surfaced a pre-existing limitation RSS excerpts
+      almost never triggered): `_split_sentences`'s naive splitter only
+      split on `.`/`!`/`?` directly followed by whitespace. Real news
+      prose routinely closes a quote with a curly quote mark
+      immediately after the period (`...our Country.” On Saturday...`)
+      -- with no character-class allowance for that, the boundary was
+      never split at all, silently merging many real sentences into
+      one giant "sentence" and defeating `MAX_SUMMARY_SENTENCES`
+      entirely (confirmed live: story #3 produced a 10-scene, 125s
+      video before the fix, vs. a properly-capped 4-scene, 41s video
+      after). Fixed by capturing (not discarding) an optional closing
+      quote/paren/bracket character as part of the sentence boundary,
+      so it's reattached to the sentence it closes rather than silently
+      dropped (which would otherwise leave an unclosed opening quote
+      visible in burned captions).
+- [x] Tests: 5 new in `tests/test_script_generator.py` (prefers
+      raw_content, falls back on `None`/blank raw_content, works with
+      only raw_content and no raw_summary, a full article body still
+      gets the same HTML-strip/promo-drop/truncation-marker-drop/
+      3-sentence-cap hygiene) plus 1 regression test for the splitter
+      bug above. 3 existing `fake_generate_script` stand-ins in
+      `tests/test_produce_preserves_edited_script.py` updated to accept
+      the new `raw_content` keyword (assertions unchanged -- the
+      edited-script guard itself was never touched). Full `pytest`
+      suite: 321 passing.
+- [x] Real validation via the REAL `POST /api/v1/stories/3/produce`
+      (not simulated): reset a real story's `StoryContent` (one whose
+      `raw_content` was already populated from an earlier real
+      content-dedup fetch, `raw_summary` a single thin sentence vs.
+      `raw_content` 3318 real characters), re-produced it live twice
+      (once exposing the splitter bug above, once confirming the fix).
+      Final `script_text` correctly reflects the real article's own
+      first 3 sentences, properly bounded, closing quotes intact.
+      `ffprobe`/`volumedetect` on the resulting enhanced video: real
+      video+audio streams both 41.24s, narration present (mean -19.5dB,
+      max -4.4dB, not silent, no clipping).
+- [x] **Found, reported, deliberately NOT fixed in this pass:** the
+      same real story's storyboard now trips 3 caption-cue QA checks
+      (`caption_cue_duration`/`word_count`/`line_count`) on one scene,
+      since one of the real article's 3 sentences is long/comma-heavy
+      enough on its own to exceed those per-cue budgets. Same class of
+      already-accepted, non-blocking QA finding as `duration_target`
+      exceeding 5 minutes (an honest report, not a gate) -- not unique
+      to this feature (a sufficiently long RSS sentence could trip the
+      same check), just modestly more likely now that source sentences
+      are real news prose instead of terse RSS blurbs. Fixing the
+      caption-cue splitter to further break down an over-budget single
+      sentence is storyboard/caption-composition territory
+      (`storyboard_generator.py`/`storyboard_composer.py`), out of this
+      task's scope (script generation only).
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -2365,19 +2443,11 @@ auto-blocking).
 
 ### Requested 2026-09-22 (not yet scheduled)
 
-- [ ] **Full article-content web scraping as the real content source.**
-      Full-article fetching already exists
-      (`app/content/article_extractor.py::fetch_full_article_text`),
-      but today it's only used transiently inside content-dedup
-      (`app/tasks/content_dedup.py`) for TF-IDF comparison -- the
-      result isn't treated as the story's real content. Extend this
-      so script generation (`app/tasks/content.py`/`episode_video.py`)
-      can draw on the full scraped body instead of RSS's often-thin
-      `raw_summary`. Needs a decision on whether `raw.news_items.
-      raw_content` becomes the permanent full-text store (it's
-      currently populated by content-dedup's fetch as a side effect)
-      or a separate field/table, and how failures degrade (same
-      fetch_error/non_html/empty_extraction statuses already exist).
+- [x] ~~Full article-content web scraping as the real content source~~
+      -- done, see "part 48" below. `raw.news_items.raw_content` (already
+      existed, already populated by content-dedup's fetch) is now also
+      script generation's preferred source text, with a graceful
+      fallback to `raw_summary` when a fetch never happened or failed.
 - [ ] **More RSS feeds.** `app/sources/registry.py` currently has 11
       sources (one disabled -- VentureBeat, Vercel bot-challenge).
       Expand coverage to raise the daily raw-item ceiling (candidates:

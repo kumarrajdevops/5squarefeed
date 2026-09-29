@@ -56,7 +56,7 @@ def test_ensure_script_and_voice_preserves_a_human_edited_script(db_session, mon
     generate_script_calls = []
     voice_calls = []
 
-    def fake_generate_script(title, raw_summary):
+    def fake_generate_script(title, raw_summary, raw_content=None):
         generate_script_calls.append((title, raw_summary))
         return {"headline": "SHOULD NOT BE USED", "summary": "SHOULD NOT BE USED", "script_text": "SHOULD NOT BE USED"}
 
@@ -98,7 +98,7 @@ def test_ensure_script_and_voice_generates_script_for_brand_new_story(db_session
 
     generate_script_calls = []
 
-    def fake_generate_script(title, raw_summary):
+    def fake_generate_script(title, raw_summary, raw_content=None):
         generate_script_calls.append((title, raw_summary))
         return {"headline": "Generated headline", "summary": "Generated summary", "script_text": "Generated script"}
 
@@ -139,7 +139,7 @@ def test_ensure_script_and_voice_retry_after_voice_failure_does_not_reregenerate
     monkeypatch.setattr(
         content_task,
         "generate_script",
-        lambda title, raw_summary: generate_script_calls.append(1) or {},
+        lambda title, raw_summary, raw_content=None: generate_script_calls.append(1) or {},
     )
     monkeypatch.setattr(content_task, "synthesize_voice", lambda text, output_path: [])
     monkeypatch.setattr(content_task, "get_audio_duration_seconds", lambda path: 8.0)

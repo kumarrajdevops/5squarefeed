@@ -64,7 +64,7 @@ def ensure_script_and_voice(db, story: NewsItem, content: StoryContent) -> bool:
     """
     if not content.script_text:
         try:
-            script = generate_script(title=story.title, raw_summary=story.raw_summary)
+            script = generate_script(title=story.title, raw_summary=story.raw_summary, raw_content=story.raw_content)
             content.headline = script["headline"]
             content.summary = script["summary"]
             content.script_text = script["script_text"]
