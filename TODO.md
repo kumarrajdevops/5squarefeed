@@ -2436,6 +2436,49 @@ auto-blocking).
       several of the pre-existing sources in the same run). Full
       `pytest` suite unaffected (registry is data-only): 321 passing.
 
+### This session — 2026-09-29, part 50 (visual workflow chart)
+
+- [x] New `app.main._compute_pipeline_stages(db, episode, primary_count,
+      backup_count)`, wired into `GET /api/v1/episodes/{id}`'s existing
+      response as a new `"pipeline"` key -- no new endpoint, no schema
+      change. Collect -> Rank & Select are, by construction, already
+      "done" for any episode that exists at all (rank/select is what
+      creates the row, after classify -> dedup -> content-dedup ->
+      verify already ran synchronously in the same
+      `run_daily_processing()` call) -- their real value is showing
+      WHAT happened (real counts, derived from `CollectionRun` +
+      `StoryState`, no new persistence), not IF. Produce/QA/Approve/
+      Publish reuse the episode's own existing status fields
+      unchanged. QA "failed" is shown as "warn" (amber), not a hard
+      failure -- consistent with this project's own "QA never blocks
+      approval" rule.
+- [x] Dashboard: new `renderPipelineChartHtml()` in `app.js`, rendered
+      in the episode studio view between the header and the video
+      player -- a horizontal step chart reusing the existing `.pill`
+      visual language unchanged (two new CSS states added: `.pill.done`
+      alongside the existing green group, `.pill.warn` alongside the
+      existing amber group). Complements, doesn't replace, the
+      existing per-stage buttons and header pills, per this item's own
+      framing.
+- [x] 9 new focused tests (`tests/test_pipeline_stages.py`): nothing-
+      run-yet (all pending except the trivially-done Rank & Select),
+      real `CollectionRun` success/failure counts, real per-story
+      counts across all four classify/dedup/content-dedup/verify
+      stages from a real mixed `StoryState` fixture, every
+      `video_status`/`qa_status`/episode `status`/`publish_status`
+      value mapped to the correct chart state. Full `pytest` suite:
+      330 passing.
+- [x] Real validation: fetched the actual `GET /api/v1/episodes/1`
+      response live (a real, previously-produced episode, not a
+      fixture) and confirmed the chart renders correctly in a real
+      browser tab against that real data -- collect/classify/dedup/
+      content-dedup/verify/rank-select all green with real counts
+      (2312 seen 24 new, 24 classified 17 AI candidates, etc.), QA
+      shown amber ("3 check(s) failed"), approve/publish amber
+      ("awaiting review"/"not yet published"). Confirmed the rest of
+      the studio view (QA panel, story list) still renders correctly
+      alongside it.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -2494,13 +2537,8 @@ auto-blocking).
       before) the budget/diversity selection algorithm described in
       the design-principle note just below -- expanding labels with no
       consumer for them yet is premature.
-- [ ] **Visual workflow chart in the dashboard.** A diagram/flowchart
-      view of the full pipeline (Collect -> Classify -> Dedup ->
-      Content-Dedup -> Verify -> Rank & Select -> Produce -> QA ->
-      Approve -> Publish) showing each stage's current status for a
-      given date/episode at a glance -- complements, doesn't replace,
-      the per-stage buttons added this session ("part 41"'s Process
-      Episode / individual stage buttons).
+- [x] ~~Visual workflow chart in the dashboard~~ -- done, see "part 50"
+      below. Shown in the episode studio view, above the video player.
 - [ ] **Surface task/worker logs in the dashboard.** No way today to
       see what a task actually did short of `docker compose logs
       worker` on the host. Consider a per-task-id or per-episode log

@@ -699,6 +699,34 @@ function formatElapsed(ms) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+// Visual workflow chart -- Collect -> Classify -> Dedup -> Content-
+// Dedup -> Verify -> Rank & Select -> Produce -> QA -> Approve ->
+// Publish, each stage's real current status/count for this episode's
+// date at a glance (ep.pipeline, from app.main._compute_pipeline_stages).
+// Complements, doesn't replace, the per-stage buttons and existing
+// header pills -- reuses the same .pill visual language already used
+// for those (pending/failed already styled; "done"/"warn" added in
+// style.css).
+function renderPipelineChartHtml(pipeline) {
+  if (!pipeline || !pipeline.length) return "";
+  const steps = pipeline
+    .map(
+      (stage) => `
+        <div class="pipeline-step">
+          <span class="pill ${stage.status}">${escapeHtml(stage.label)}</span>
+          <div class="pipeline-step-detail">${escapeHtml(stage.detail)}</div>
+        </div>
+      `
+    )
+    .join('<span class="pipeline-arrow" aria-hidden="true">&rarr;</span>');
+  return `
+    <div class="panel pipeline-panel">
+      <h2>Pipeline</h2>
+      <div class="pipeline-chart">${steps}</div>
+    </div>
+  `;
+}
+
 function renderStudioLayout(ep) {
   const producing = ep.video_status === "producing";
   const publishing = ep.publish_status === "publishing";
@@ -739,6 +767,8 @@ function renderStudioLayout(ep) {
         <span class="pill youtube-env youtube-env-${ep.youtube_environment}" title="A Publish click uploads to the ${ep.youtube_environment.toUpperCase()} YouTube channel/credentials (app/config.py's YOUTUBE_ENVIRONMENT)">${ep.youtube_environment} channel</span>
       </div>
     </div>
+
+    ${renderPipelineChartHtml(ep.pipeline)}
 
     ${ep.video_url
       ? `<video class="player" id="player" controls src="${cacheBust(ep.video_url, ep.video_produced_at)}"></video>`

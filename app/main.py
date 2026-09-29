@@ -948,6 +948,123 @@ def _discovery_info(item: NewsItem) -> dict | None:
     return None
 
 
+def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_count: int) -> list[dict]:
+    """
+    Derives each of the daily pipeline's 10 stages' real status for
+    this episode's episode_date -- purely from data that already
+    exists (CollectionRun, StoryState, the episode's own fields), no
+    new persistence. Collect -> Rank & Select are, by construction,
+    already complete for any episode that exists at all: rank/select
+    is what creates the Episode row, after running classify -> dedup ->
+    content-dedup -> verify synchronously in the same
+    run_daily_processing() call (see app/tasks/scheduled.py) -- so
+    their real value here is showing WHAT happened (real counts), not
+    IF. Produce -> Publish reuse the episode's own existing status
+    fields, unchanged.
+
+    Complements, does not replace, the per-stage dashboard buttons
+    (see TODO.md's "Visual workflow chart" item) -- a status/count
+    snapshot for this one episode's date, not a control surface.
+    """
+    target_date = episode.episode_date
+
+    collection_run = (
+        db.query(CollectionRun)
+        .filter(CollectionRun.collection_date == target_date)
+        .order_by(CollectionRun.started_at.desc())
+        .first()
+    )
+    if collection_run is None:
+        collect_status, collect_detail = "pending", "not yet run"
+    elif collection_run.status == "failed":
+        collect_status, collect_detail = "failed", f"{collection_run.error_count} error(s)"
+    else:
+        collect_status = "done" if collection_run.status == "success" else "pending"
+        seen = collection_run.rss_items_seen + collection_run.hn_items_seen
+        inserted = collection_run.rss_items_inserted + collection_run.hn_items_inserted
+        collect_detail = f"{seen} seen, {inserted} new"
+
+    # StoryState rows are created ONLY by classify (never by
+    # collection, see that model's own docstring) -- their mere
+    # existence for this date's stories IS "classify has run"; every
+    # later count below is scoped to this same cohort.
+    story_states = (
+        db.query(StoryState)
+        .join(NewsItem, StoryState.id == NewsItem.id)
+        .filter(NewsItem.collection_date == target_date)
+        .all()
+    )
+    classified = len(story_states)
+    processed_status = "done" if classified else "pending"
+
+    ai_candidates = sum(1 for s in story_states if s.ai_relevance == "ai_candidate")
+    dup_count = sum(1 for s in story_states if s.canonical_story_id is not None)
+    repeat_count = sum(1 for s in story_states if s.repeats_story_id is not None)
+    fetched_count = sum(1 for s in story_states if s.content_fetch_status is not None)
+    verified_count = sum(1 for s in story_states if s.verification_status == "verified")
+    unverified_count = sum(1 for s in story_states if s.verification_status == "unverified")
+
+    produce_status = {"ready": "done", "failed": "failed"}.get(episode.video_status, "pending")
+    produce_detail = {
+        "ready": "video ready", "producing": "producing…",
+        "failed": "failed", "pending": "not yet run",
+    }.get(episode.video_status, episode.video_status)
+
+    if episode.qa_status == "passed":
+        qa_stage_status, qa_detail = "done", "all checks passed"
+    elif episode.qa_status == "failed":
+        qa_report = json.loads(episode.qa_report) if episode.qa_report else []
+        failed_checks = sum(1 for c in qa_report if c.get("passed") is False)
+        # QA never blocks approval (see main.py's approve endpoint) --
+        # a real, honest finding, not a hard failure, so "warn" (same
+        # amber family as "pending"), not "failed" (red).
+        qa_stage_status, qa_detail = "warn", f"{failed_checks} check(s) failed"
+    else:
+        qa_stage_status, qa_detail = "pending", "not yet run"
+
+    approve_status = {"approved": "done", "rejected": "failed"}.get(episode.status, "pending")
+    approve_detail = {"approved": "approved", "rejected": "rejected", "draft": "awaiting review"}.get(
+        episode.status, episode.status
+    )
+
+    publish_status = {"published": "done", "failed": "failed"}.get(episode.publish_status, "pending")
+    publish_detail = {
+        "published": "published", "publishing": "publishing…",
+        "failed": episode.publish_error or "failed", "not_published": "not yet published",
+    }.get(episode.publish_status, episode.publish_status)
+
+    return [
+        {"stage": "collect", "label": "Collect", "status": collect_status, "detail": collect_detail},
+        {
+            "stage": "classify", "label": "Classify", "status": processed_status,
+            "detail": f"{classified} classified, {ai_candidates} AI candidates" if classified else "not yet run",
+        },
+        {
+            "stage": "dedup", "label": "Dedup", "status": processed_status,
+            "detail": f"{dup_count} duplicate(s) removed" if classified else "not yet run",
+        },
+        {
+            "stage": "content_dedup", "label": "Content-Dedup", "status": processed_status,
+            "detail": (
+                f"{fetched_count} article(s) fetched, {repeat_count} historical repeat(s)"
+                if classified else "not yet run"
+            ),
+        },
+        {
+            "stage": "verify", "label": "Verify", "status": processed_status,
+            "detail": f"{verified_count} verified, {unverified_count} unverified" if classified else "not yet run",
+        },
+        {
+            "stage": "rank_select", "label": "Rank & Select", "status": "done",
+            "detail": f"{primary_count} primary, {backup_count} backup selected",
+        },
+        {"stage": "produce", "label": "Produce", "status": produce_status, "detail": produce_detail},
+        {"stage": "qa", "label": "QA", "status": qa_stage_status, "detail": qa_detail},
+        {"stage": "approve", "label": "Approve", "status": approve_status, "detail": approve_detail},
+        {"stage": "publish", "label": "Publish", "status": publish_status, "detail": publish_detail},
+    ]
+
+
 def _serialize_episode(db, episode: Episode) -> dict:
     """
     Shared serialization for the two episode-viewing endpoints above.
@@ -1043,6 +1160,7 @@ def _serialize_episode(db, episode: Episode) -> dict:
         # click would actually use, before it's clicked. See
         # app/config.py's youtube_environment (dev vs prod).
         "youtube_environment": settings.youtube_environment,
+        "pipeline": _compute_pipeline_stages(db, episode, len(primary), len(backup)),
         "primary": primary,
         "backup": backup,
     }
