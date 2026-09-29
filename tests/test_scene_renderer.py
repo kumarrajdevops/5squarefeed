@@ -71,6 +71,98 @@ def test_statistic_progress_shows_an_intermediate_value_before_final():
     assert scene_renderer._progress_stat(None, 0.5) is None
 
 
+def test_statistic_scene_with_no_stat_wraps_the_headline_instead_of_overflowing(tmp_path):
+    """
+    Direct regression for a real bug found live in a produced episode
+    (visible ~6:50-6:52): a "statistic" scene with no real extracted
+    stat/number (storyboard_generator's own visual_mode == "headline"
+    case for a plain narration-derived headline) drew that headline at
+    the 260pt stat_font meant for a short string like "$10B", with no
+    wrapping -- a full sentence ran off both edges of the frame. Also
+    used to draw the SAME headline a second time (the entity-line
+    fallback), at a different size, right below it.
+
+    Verified by recording every (text, font_size) pair Pillow's own
+    text-drawing call actually received, not by guessing at layout.
+    """
+    headline = "In a press release on Monday"
+    scene = {
+        "scene_type": "statistic",
+        "narration_text": (
+            "In a press release on Monday, Instinct confirmed this was a Series C "
+            "round — a pretty quick growth round for a startup that launched "
+            "its invite-only service in August 2026."
+        ),
+        "stat": None,
+        "unit": None,
+        "entity": headline,
+        "tier": None,
+        "date": "2026",
+        "source": None,
+        "headline": headline,
+        "visual_mode": "headline",
+    }
+
+    drawn = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture(self, xy, text, *args, **kwargs):
+        font = kwargs.get("font")
+        drawn.append((text, font.size if font else None))
+        return original_text(self, xy, text, *args, **kwargs)
+
+    with patch.object(ImageDraw.ImageDraw, "text", _capture):
+        scene_renderer.render_scene_image(scene, _storyboard(), tmp_path / "statistic_headline.png")
+
+    # The full, un-wrapped headline must never be drawn as one long
+    # string at the old 260pt stat size -- it must be wrapped into
+    # shorter lines instead.
+    giant_texts = [text for text, size in drawn if size == 260]
+    assert headline not in giant_texts
+    assert not any(len(text) > 40 for text in giant_texts), giant_texts
+
+    # The headline's own words must appear at exactly one font size --
+    # never drawn twice (once giant, once small) the way the old code did.
+    headline_font_sizes = {size for text, size in drawn if "press release" in text}
+    assert len(headline_font_sizes) == 1
+
+    # date ("2026") still shows in the footer, unaffected by this fix.
+    assert any("2026" in text for text, _ in drawn)
+    assert (tmp_path / "statistic_headline.png").exists()
+
+
+def test_statistic_scene_with_a_real_stat_is_unaffected_by_the_headline_fix(tmp_path):
+    """Regression safety net: a real statistic scene (the common case,
+    with an actual extracted stat/entity) must render exactly as
+    before -- the big stat number at 260pt, the entity label
+    separately at 56pt."""
+    scene = {
+        "scene_type": "statistic",
+        "narration_text": "The company reached 49 million users this year.",
+        "stat": "49",
+        "unit": "M",
+        "entity": "Users",
+        "tier": None,
+        "date": None,
+        "source": None,
+        "headline": None,
+    }
+
+    drawn = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture(self, xy, text, *args, **kwargs):
+        font = kwargs.get("font")
+        drawn.append((text, font.size if font else None))
+        return original_text(self, xy, text, *args, **kwargs)
+
+    with patch.object(ImageDraw.ImageDraw, "text", _capture):
+        scene_renderer.render_scene_image(scene, _storyboard(), tmp_path / "statistic_real.png")
+
+    assert ("49M", 260) in drawn
+    assert ("Users", 56) in drawn
+
+
 def test_render_scene_frame_sequence_ramps_for_countup_and_holds_final_value(tmp_path):
     """
     A comparison scene with the ORIGINAL flat countup_seconds shape

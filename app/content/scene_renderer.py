@@ -192,18 +192,51 @@ def _render_statistic_scene(scene: dict, storyboard: dict, output_path: Path, pr
     _draw_taxonomy_badge(draw, storyboard.get("taxonomy_category"), accent)
 
     stat, unit = _progress_stat(scene.get("stat"), progress), scene.get("unit") or ""
-    stat_font = ImageFont.truetype(FONT_BOLD, 260)
-    stat_text = f"{stat}{unit}" if stat else (scene.get("headline") or "")
-    draw.text((CONTENT_MARGIN_X, 420), stat_text, font=stat_font, fill=TEXT_COLOR)
 
-    entity = scene.get("entity") or scene.get("headline") or ""
-    entity_font = ImageFont.truetype(FONT_BOLD, 56)
-    draw.text((CONTENT_MARGIN_X, 720), entity, font=entity_font, fill=TEXT_COLOR)
+    if not stat:
+        # No real numeric value was extracted for this scene --
+        # storyboard_generator's own explicit "headline" visual_mode
+        # (see render_scene_frame_sequence's countup-suppression check
+        # just above this function's other caller) for a scene that's
+        # really a plain narration-derived headline, not a stat
+        # highlight. Real bug found live (episode 5, ~6:50-6:52): this
+        # branch used to fall through to the 260pt stat_font below with
+        # no wrapping, meant for a short string like "$10B" -- a full
+        # sentence ("In a press release on Monday") ran off both edges
+        # of the frame. Draw it ONCE, wrapped, at the same kicker-style
+        # treatment _render_hero_scene uses -- never draw the same
+        # headline text twice at two different sizes, which the old
+        # code also did (this branch's fallback AND the entity line
+        # below both fell back to scene["headline"]).
+        headline = scene.get("headline") or scene.get("entity") or ""
+        headline_font = ImageFont.truetype(FONT_BOLD, 100)
+        max_width = SCENE_WIDTH - CONTENT_MARGIN_X * 2
+        lines = _wrap_text(draw, headline, headline_font, max_width)[:3]
+        line_height = 118
+        headline_height = line_height * len(lines)
+        start_y = max(420, (CAPTION_SAFE_TOP - headline_height) // 2)
 
-    footer_parts = [p for p in (scene.get("tier"), scene.get("date"), scene.get("source")) if p]
-    if footer_parts:
-        footer_font = ImageFont.truetype(FONT_REGULAR, 36)
-        draw.text((CONTENT_MARGIN_X, 800), "  ·  ".join(footer_parts), font=footer_font, fill=SOURCE_COLOR)
+        for i, line in enumerate(lines):
+            draw.text((CONTENT_MARGIN_X, start_y + i * line_height), line, font=headline_font, fill=TEXT_COLOR)
+
+        footer_parts = [p for p in (scene.get("tier"), scene.get("date"), scene.get("source")) if p]
+        if footer_parts:
+            footer_font = ImageFont.truetype(FONT_REGULAR, 36)
+            footer_y = start_y + headline_height + 40
+            draw.text((CONTENT_MARGIN_X, footer_y), "  ·  ".join(footer_parts), font=footer_font, fill=SOURCE_COLOR)
+    else:
+        stat_font = ImageFont.truetype(FONT_BOLD, 260)
+        stat_text = f"{stat}{unit}"
+        draw.text((CONTENT_MARGIN_X, 420), stat_text, font=stat_font, fill=TEXT_COLOR)
+
+        entity = scene.get("entity") or scene.get("headline") or ""
+        entity_font = ImageFont.truetype(FONT_BOLD, 56)
+        draw.text((CONTENT_MARGIN_X, 720), entity, font=entity_font, fill=TEXT_COLOR)
+
+        footer_parts = [p for p in (scene.get("tier"), scene.get("date"), scene.get("source")) if p]
+        if footer_parts:
+            footer_font = ImageFont.truetype(FONT_REGULAR, 36)
+            draw.text((CONTENT_MARGIN_X, 800), "  ·  ".join(footer_parts), font=footer_font, fill=SOURCE_COLOR)
 
     _draw_source_line(draw, storyboard.get("source_name", ""))
     image.save(output_path, "PNG")

@@ -2528,6 +2528,65 @@ auto-blocking).
       (`video_status="ready"`, `video_started_at=NULL`,
       `video_produced_at` untouched throughout).
 
+### This session — 2026-09-29, part 52 (bug fix: oversized/duplicated text in a real produced episode)
+
+- [x] **Real bug, reported by the user watching Episode 5's video**
+      (~6:50-6:52): a giant, unwrapped headline ran off both edges of
+      the frame, with a smaller correctly-sized copy of the same text
+      directly below it. Root-caused via real frame extraction
+      (`ffprobe`/`ffmpeg -ss`) at the exact timestamp, cumulative
+      story-offset math to identify the story, then reading its real
+      `storyboard.json`: story #170's `statistic_3` scene had
+      `scene_type: "statistic"` but no real extracted `stat`/`entity`
+      value (`visual_mode: "headline"`, an explicit, intentional
+      degenerate case `render_scene_frame_sequence` already knew
+      about for count-up suppression) -- but
+      `_render_statistic_scene()` itself was never taught this case:
+      it fell back to drawing the plain-sentence `headline` at the
+      260pt font meant for a short stat like "$10B", with no
+      wrapping, AND separately drew the same headline a second time
+      (the `entity` fallback) at 56pt right below it.
+- [x] Fixed in `app/content/scene_renderer.py::_render_statistic_scene`:
+      when no real `stat` exists, draw the headline ONCE, wrapped
+      (reusing `_wrap_text`, same kicker-style treatment
+      `_render_hero_scene` already uses), never at the oversized stat
+      font. The real-stat path (the common case) is completely
+      unchanged.
+- [x] Scanned every stored storyboard repo-wide for the same pattern
+      (`scene_type == "statistic"` with no `stat`) before considering
+      this done -- confirmed only 2 instances existed anywhere
+      (story #170 in Episode 5, the one reported; story #19,
+      unrelated to any current episode), so the blast radius was
+      small and well understood, not guessed at.
+- [x] 2 new focused tests (`tests/test_scene_renderer.py`), using the
+      same "record every real Pillow text-draw call" pattern the
+      existing comparison-scene test already established: the
+      no-stat/headline fallback never draws the full sentence at the
+      260pt size and never draws it twice at two different sizes; the
+      real-stat path is provably unaffected. Full `pytest` suite:
+      336 passing.
+- [x] Real validation, not simulated: rendered story #170's exact real
+      scene data directly through the fixed code and inspected the
+      output PNG (headline now wrapped, single instance, properly
+      sized) -- then triggered a REAL full reprocess of Episode 5
+      (`POST /episodes/5/process`, ~36 minutes -- see below for why),
+      and re-extracted frames from the actual regenerated, currently-
+      served `episode_5_pillow_enhanced.mp4` at the same real
+      timestamp: confirmed fixed in the file the user actually
+      watches, not just in isolation.
+- [x] The reprocess took ~36 minutes (`storyboard_prerequisite_s`:
+      889.1, `story_render_s`: 1008.5, `audio_mix_s`: 112.1,
+      `final_mux_s`: 166.4), far longer than a typical cached
+      reprocess -- investigated live (worker logs, `celery inspect
+      active`, container clock vs host clock to rule out a false
+      "6-hour gap" reading from a timezone mismatch) and confirmed
+      NOT a hang: Episode 5's original production this morning never
+      properly completed on its first attempt (the same episode from
+      part 51's timer-bug investigation), so none of its 25 stories'
+      storyboards were valid/reusable -- this was genuinely the first
+      full, real render for all 25, not a re-render of already-cached
+      work.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
