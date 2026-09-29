@@ -2400,6 +2400,42 @@ auto-blocking).
       (`storyboard_generator.py`/`storyboard_composer.py`), out of this
       task's scope (script generation only).
 
+### This session — 2026-09-29, part 49 (more RSS feeds)
+
+- [x] Every candidate real-verified live (HTTP status, valid feed,
+      recency) before being added, not just guessed -- same standard
+      the existing DeepMind/Wired entries already used. 5 real, working
+      sources added: Simon Willison's Weblog (Atom, 30 entries, same-
+      day latest post), Google Research Blog (broader-than-AI, same
+      accepted pattern as Microsoft Research Blog already in the
+      registry), IEEE Spectrum -- Artificial Intelligence, Amazon
+      Science, and Berkeley AI Research/BAIR (real but low-frequency,
+      kept anyway -- not every source needs to post daily).
+      `app/sources/registry.py`: 11 -> 17 total sources, 10 -> 16
+      enabled.
+- [x] Also evaluated and deliberately did NOT add (documented directly
+      in the registry so a future pass doesn't retry the same dead
+      ends): Anthropic and Meta AI (no advertised RSS/Atom feed found
+      on their news/blog pages, genuinely no public feed -- not a bot-
+      block); r/MachineLearning / r/artificial (Reddit's RSS worked
+      once, then returned HTTP 429 on the very next request moments
+      later -- same class of unreliable-for-a-scheduled-bot risk as
+      VentureBeat's existing Vercel-challenge exclusion, not something
+      to build retry/backoff evasion for); MIT CSAIL News (feed parses
+      but its latest entry is from 2019, abandoned); Stanford HAI News/
+      IBM Research Blog/Stability AI/MarkTechPost (404/403, or 0
+      parseable entries at verification time).
+- [x] Real validation: triggered the actual production
+      `POST /api/v1/collection/run` (not a mocked/simulated feed parse)
+      after a worker restart -- all 16 enabled sources processed,
+      `failed_sources: 0`. Two of the five new sources already
+      contributed real new items within the same run's coverage
+      window: Simon Willison's Weblog (+4), IEEE Spectrum (+1); the
+      other three simply had nothing new in-window at that exact
+      moment (not a failure -- `outside_window`/zero-seen, same as
+      several of the pre-existing sources in the same run). Full
+      `pytest` suite unaffected (registry is data-only): 321 passing.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
@@ -2448,14 +2484,10 @@ auto-blocking).
       existed, already populated by content-dedup's fetch) is now also
       script generation's preferred source text, with a graceful
       fallback to `raw_summary` when a fetch never happened or failed.
-- [ ] **More RSS feeds.** `app/sources/registry.py` currently has 11
-      sources (one disabled -- VentureBeat, Vercel bot-challenge).
-      Expand coverage to raise the daily raw-item ceiling (candidates:
-      Anthropic blog, Meta AI blog, Simon Willison's blog, r/
-      MachineLearning, etc.) -- directly helps the "will we run out of
-      25+5 stories" concern from earlier this session, now that a
-      real full Top-25+5 selection has been observed (2026-09-21,
-      "part 41" above) once RSS+HN volume was high enough for one day.
+- [x] ~~More RSS feeds~~ -- done, see "part 49" below. 5 new sources
+      added (16 enabled total, up from 11); Anthropic/Meta AI (no real
+      feed) and Reddit (bot-blocked) evaluated and deliberately left
+      out -- see the registry's own "deliberately NOT added" comment.
 - [ ] **More taxonomy labels.** Current 5-category deterministic
       taxonomy (`app/extraction/taxonomy.py`, "part 37" above) is
       intentionally coarse, labels-only. Revisit alongside (not

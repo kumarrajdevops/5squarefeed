@@ -88,4 +88,72 @@ NEWS_SOURCES = [
         # valid RSS 2.0, latest item dated 2026-09-14.
         "enabled": True,
     },
+    {
+        "name": "Simon Willison's Weblog",
+        "url": "https://simonwillison.net/atom/everything/",
+        "source_type": "rss",
+        # Verified 2026-09-29: official Atom feed (feedparser handles
+        # Atom transparently, same as every RSS 2.0 source above --
+        # source_type stays "rss" for all of them, no separate label
+        # exists in this codebase). HTTP 200, 30 entries, latest dated
+        # 2026-09-28 (same day). A well-known independent AI
+        # practitioner/commentator blog -- directly relevant, not a
+        # general tech outlet the relevance filter has to narrow down.
+        "enabled": True,
+    },
+    {
+        "name": "Google Research Blog",
+        "url": "https://research.google/blog/rss/",
+        "source_type": "rss",
+        # Verified 2026-09-29: HTTP 200, valid RSS, 100 entries, latest
+        # dated 2026-09-24. Broader than AI-only, same as Microsoft
+        # Research Blog above -- the deterministic AI-relevance filter
+        # narrows it down, same pattern.
+        "enabled": True,
+    },
+    {
+        "name": "IEEE Spectrum — Artificial Intelligence",
+        "url": "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss",
+        "source_type": "rss",
+        # Verified 2026-09-29: official IEEE Spectrum AI-topic tag feed,
+        # HTTP 200, valid RSS, 30 entries, latest dated 2026-09-28.
+        "enabled": True,
+    },
+    {
+        "name": "Amazon Science",
+        "url": "https://www.amazon.science/index.rss",
+        "source_type": "rss",
+        # Verified 2026-09-29: HTTP 200, valid RSS, 25 entries, latest
+        # dated 2026-09-25.
+        "enabled": True,
+    },
+    {
+        "name": "Berkeley AI Research (BAIR)",
+        "url": "https://bair.berkeley.edu/blog/feed.xml",
+        "source_type": "rss",
+        # Verified 2026-09-29: HTTP 200, valid RSS, 10 entries. Real but
+        # low-frequency (latest item dated 2026-07-29, ~2 months old as
+        # of verification) -- kept anyway, same as this project accepts
+        # any source that doesn't post daily; it simply won't
+        # contribute a story most days, not a broken feed.
+        "enabled": True,
+    },
 ]
+
+# Candidates evaluated and deliberately NOT added, so a future pass
+# doesn't re-try the same dead ends:
+# - Anthropic, Meta AI: no advertised RSS/Atom <link> on their news/blog
+#   pages and no working feed found at any common guessed path --
+#   genuinely no public feed to subscribe to, not a bot-block (unlike
+#   VentureBeat below).
+# - r/MachineLearning, r/artificial (Reddit RSS): the first request
+#   succeeded, but a second request moments later returned HTTP 429 --
+#   same class of unreliable-for-a-scheduled-bot risk as VentureBeat's
+#   Vercel challenge below, not something to build retry/backoff
+#   evasion for.
+# - MIT CSAIL News: feed parses fine but its latest entry is dated
+#   2019 -- abandoned, would never contribute a story in any real
+#   collection window.
+# - Stanford HAI News, IBM Research Blog, Stability AI, MarkTechPost:
+#   HTTP 404/403, or a 200 with zero parseable entries (bozo=1) at
+#   verification time.
