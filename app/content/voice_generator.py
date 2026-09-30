@@ -6,9 +6,10 @@ import edge_tts
 
 # The architecture calls for "One branded AI voice" across every
 # episode -- hardcoded rather than configurable so every story sounds
-# consistent. en-US-GuyNeural is a free Microsoft neural voice served
-# by edge-tts over the network; no API key required.
-VOICE_NAME = "en-US-GuyNeural"
+# consistent. en-US-JennyNeural (chosen by the user from the voice
+# samples) is a free Microsoft neural voice served by edge-tts over the
+# network; no API key required.
+VOICE_NAME = "en-US-JennyNeural"
 
 # edge-tts reports SentenceBoundary offset/duration in "ticks" (100-ns
 # units, the Azure Speech convention) -- divide by this to get seconds.

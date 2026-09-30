@@ -77,9 +77,10 @@ Don't re-diagnose from scratch.
    transitions, intro/outro), update `computeStartOffset()` in
    `app.js` too.** It sums preceding stories' durations to compute
    where each story starts in the combined video for "click rank to
-   jump player" — anything that changes the actual timeline (a gap
-   clip, a resequencing) has to be reflected there or that feature
-   silently drifts out of sync, which is the same class of bug as #4
+   jump player" — anything that changes the actual timeline (a
+   transition slot, a resequencing) has to be reflected there or that feature
+   silently drifts out of sync (the intro is a fixed `INTRO_DUR + GAP_DUR` =
+   8.1 s, mirrored by `INTRO_LEAD_IN_SECONDS`), which is the same class of bug as #4
    just relocated to a different feature.
 
 6. **Drag-and-drop in the dashboard needs real `DragEvent`s to test.**
@@ -147,6 +148,18 @@ Don't re-diagnose from scratch.
     instant each stage actually starts. Any future resumable timer
     needs the same real anchor, not `Date.now()` at resume time.
 
+12. **Never feed a long still image to ffmpeg as a looped input
+    (`-loop 1 -i still.png`) in the per-story render.** A looped image
+    input gets its own decode thread that races ahead of the encoder
+    and buffers frames in proportion to story length -- a 140 s story
+    needed >7 GB and ffmpeg was OOM-killed on the 7.6 GiB Docker VM
+    (Episode 6 failed this way; the container has no per-container
+    limit, so the whole VM dies). Use a one-frame `-i` input plus the
+    filter-graph hold `still(duration)` in
+    `app/content/episode_renderer.py` (`loop=loop=-1:size=1,...,trim`),
+    which is pulled on demand (peak ~1.1 GB). Photos are static now --
+    Ken-Burns/zoompan was removed.
+
 ## Dev environment gotchas
 
 - The `worker` container does **not** hot-reload — Celery loads task
@@ -179,6 +192,25 @@ Don't re-diagnose from scratch.
   `docker compose up -d --force-recreate api worker` and confirm with
   `docker compose exec api python -c "from app.config import settings; print(settings.youtube_configured)"`
   (or whichever setting changed) before assuming it took effect.
+- `render_card_parts` reuses `media/pillow_enhanced/ep*_work/story_*/base.png`
+  if it exists. After changing the base card (headline box, branding,
+  watermark) delete those files before re-rendering; `intro.png` is
+  regenerated every render. Brand images (`app/dashboard/branding/...`)
+  are read by path at render time, so replacing a file under the same
+  name is picked up on the next render -- but only for re-rendered
+  stories/cards.
+- `Episode.episode_date` is the *coverage* day. The intro shows the IST made-date
+  (from `Episode.created_at`, via `load_episode_stories`), not the coverage day. Selection and the unique
+  constraint depend on the coverage key.
+- Intro/outro voices live in `media/audio/bumpers/` keyed by a hash of the
+  spoken text + voice; editing `BUMPERS` text re-synthesises once. A voice
+  that overruns `INTRO_DUR`/`OUTRO_DUR` raises -- lengthen the constant and
+  `INTRO_LEAD_IN_SECONDS` together.
+- Changing `VOICE_NAME` does not re-voice cached stories (`ensure_script_and_voice`
+  skips stories that already have audio + captions). To re-voice an episode, clear
+  `audio_path`/`audio_duration_seconds`/`caption_segments`/`video_path` (never the
+  script text) and Produce again. The only SFX in the mix is the per-boundary ping
+  (`sfx_story_gap`); the removed intro/outro chimes are documented in `TODO.md`.
 
 ## Verification checklist after touching the produce/QA pipeline
 

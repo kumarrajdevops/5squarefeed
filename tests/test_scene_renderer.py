@@ -71,38 +71,8 @@ def test_statistic_progress_shows_an_intermediate_value_before_final():
     assert scene_renderer._progress_stat(None, 0.5) is None
 
 
-def test_statistic_scene_with_no_stat_wraps_the_headline_instead_of_overflowing(tmp_path):
-    """
-    Direct regression for a real bug found live in a produced episode
-    (visible ~6:50-6:52): a "statistic" scene with no real extracted
-    stat/number (storyboard_generator's own visual_mode == "headline"
-    case for a plain narration-derived headline) drew that headline at
-    the 260pt stat_font meant for a short string like "$10B", with no
-    wrapping -- a full sentence ran off both edges of the frame. Also
-    used to draw the SAME headline a second time (the entity-line
-    fallback), at a different size, right below it.
-
-    Verified by recording every (text, font_size) pair Pillow's own
-    text-drawing call actually received, not by guessing at layout.
-    """
-    headline = "In a press release on Monday"
-    scene = {
-        "scene_type": "statistic",
-        "narration_text": (
-            "In a press release on Monday, Instinct confirmed this was a Series C "
-            "round — a pretty quick growth round for a startup that launched "
-            "its invite-only service in August 2026."
-        ),
-        "stat": None,
-        "unit": None,
-        "entity": headline,
-        "tier": None,
-        "date": "2026",
-        "source": None,
-        "headline": headline,
-        "visual_mode": "headline",
-    }
-
+def _capture_draws():
+    """Records every (text, font_size) Pillow's text-drawing call receives."""
     drawn = []
     original_text = ImageDraw.ImageDraw.text
 
@@ -111,56 +81,50 @@ def test_statistic_scene_with_no_stat_wraps_the_headline_instead_of_overflowing(
         drawn.append((text, font.size if font else None))
         return original_text(self, xy, text, *args, **kwargs)
 
-    with patch.object(ImageDraw.ImageDraw, "text", _capture):
+    return drawn, patch.object(ImageDraw.ImageDraw, "text", _capture)
+
+
+def test_statistic_scene_with_no_stat_wraps_the_headline_inside_the_headline_card(tmp_path):
+    """Regression for the giant-headline overflow: a headline-mode statistic
+    scene uses the shared headline card -- fixed font size, at most
+    HEADLINE_MAX_LINES lines, every word drawn exactly once, never at the
+    stat font size."""
+    headline = "In a press release on Monday, Instinct confirmed a Series C round"
+    scene = {
+        "scene_type": "statistic", "narration_text": headline + " for the startup.",
+        "stat": None, "unit": None, "entity": headline, "tier": None,
+        "date": "2026", "source": None, "headline": headline, "visual_mode": "headline",
+    }
+    drawn, ctx = _capture_draws()
+    with ctx:
         scene_renderer.render_scene_image(scene, _storyboard(), tmp_path / "statistic_headline.png")
 
-    # The full, un-wrapped headline must never be drawn as one long
-    # string at the old 260pt stat size -- it must be wrapped into
-    # shorter lines instead.
-    giant_texts = [text for text, size in drawn if size == 260]
-    assert headline not in giant_texts
-    assert not any(len(text) > 40 for text in giant_texts), giant_texts
-
-    # The headline's own words must appear at exactly one font size --
-    # never drawn twice (once giant, once small) the way the old code did.
-    headline_font_sizes = {size for text, size in drawn if "press release" in text}
-    assert len(headline_font_sizes) == 1
-
-    # date ("2026") still shows in the footer, unaffected by this fix.
-    assert any("2026" in text for text, _ in drawn)
+    headline_words = [t for t, size in drawn if size == scene_renderer.HEADLINE_FONT_SIZE]
+    assert headline_words == headline.split()
+    assert not any(size == scene_renderer.STAT_FONT_SIZE for _, size in drawn)
     assert (tmp_path / "statistic_headline.png").exists()
 
 
-def test_statistic_scene_with_a_real_stat_is_unaffected_by_the_headline_fix(tmp_path):
-    """Regression safety net: a real statistic scene (the common case,
-    with an actual extracted stat/entity) must render exactly as
-    before -- the big stat number at 260pt, the entity label
-    separately at 56pt."""
+def test_statistic_scene_with_a_real_stat_draws_the_number_big_and_the_entity_in_the_headline(tmp_path):
     scene = {
-        "scene_type": "statistic",
-        "narration_text": "The company reached 49 million users this year.",
-        "stat": "49",
-        "unit": "M",
-        "entity": "Users",
-        "tier": None,
-        "date": None,
-        "source": None,
-        "headline": None,
+        "scene_type": "statistic", "narration_text": "The company reached 49 million users this year.",
+        "stat": "49", "unit": "M", "entity": "Users", "tier": None, "date": None, "source": None, "headline": None,
     }
-
-    drawn = []
-    original_text = ImageDraw.ImageDraw.text
-
-    def _capture(self, xy, text, *args, **kwargs):
-        font = kwargs.get("font")
-        drawn.append((text, font.size if font else None))
-        return original_text(self, xy, text, *args, **kwargs)
-
-    with patch.object(ImageDraw.ImageDraw, "text", _capture):
+    drawn, ctx = _capture_draws()
+    with ctx:
         scene_renderer.render_scene_image(scene, _storyboard(), tmp_path / "statistic_real.png")
 
-    assert ("49M", 260) in drawn
-    assert ("Users", 56) in drawn
+    assert ("49M", scene_renderer.STAT_FONT_SIZE) in drawn
+    assert ("Users", scene_renderer.HEADLINE_FONT_SIZE) in drawn
+
+
+def test_statistic_and_comparison_use_a_flat_card_but_story_visual_scenes_are_layered():
+    assert scene_renderer.uses_story_visual({"scene_type": "hero"})
+    assert scene_renderer.uses_story_visual({"scene_type": "statistic", "stat": None})
+    assert not scene_renderer.uses_story_visual({"scene_type": "statistic", "stat": "49"})
+    assert not scene_renderer.uses_story_visual({"scene_type": "comparison"})
+    assert not scene_renderer.uses_story_visual({"scene_type": "key_fact", "stages": ["a", "b"]})
+    assert scene_renderer.uses_story_visual({"scene_type": "key_fact", "stages": None})
 
 
 def test_render_scene_frame_sequence_ramps_for_countup_and_holds_final_value(tmp_path):
@@ -238,46 +202,80 @@ def test_render_scene_frame_sequence_multi_state_comparison_returns_one_segment_
     assert all(all(p.exists() for p in s["frame_paths"]) for s in segments)
 
 
-def test_hero_scene_draws_only_the_kicker_never_a_supporting_copy_of_the_full_title(tmp_path):
-    """
-    Direct regression for the hero text-duplication fix (Story #51
-    corrective iteration): the dominant kicker is the ONLY on-screen
-    title-derived text this Pillow render produces -- no second,
-    smaller copy of the full title is drawn alongside it. The real
-    burned caption (a completely separate ffmpeg/srt mechanism in
-    app/content/storyboard_composer.py, untouched by this fix) still
-    carries the full sentence at the bottom of the final video -- this
-    test only covers what this renderer itself draws into the frame.
-    """
-    title = "Why Deploying Physical AI at Scale Demands Safety at Every Layer."
-    kicker = "Deploying Physical AI at Scale…"
-    scene = {"scene_type": "hero", "narration_text": title, "kicker": kicker}
+def test_hero_scene_headline_is_the_real_story_title_never_invented_copy(tmp_path):
+    """The hero headline card shows the story's own real title (HTML entities
+    decoded), drawn word by word at one fixed size; the only other text is
+    template chrome and the source attribution -- no invented phrase."""
+    title = "Why Deploying Physical AI at Scale Demands Safety &amp; Trust"
+    scene = {"scene_type": "hero", "narration_text": "n", "kicker": "Deploying Physical AI..."}
+    drawn, ctx = _capture_draws()
+    with ctx:
+        scene_renderer.render_scene_image(scene, _storyboard(title=title, story_id=None), tmp_path / "hero.png")
 
-    drawn_texts = []
-    original_text = ImageDraw.ImageDraw.text
+    headline_words = [t for t, size in drawn if size == scene_renderer.HEADLINE_FONT_SIZE]
+    assert headline_words == "Why Deploying Physical AI at Scale Demands Safety & Trust".split()
+    known = {"NEWS", "Example Source", "\u2014 Example Source \u2197", "SOURCE"}
+    others = [t for t, size in drawn if size != scene_renderer.HEADLINE_FONT_SIZE]
+    assert all(t in known for t in others), others
 
-    def _capture(self, xy, text, *args, **kwargs):
-        drawn_texts.append(text)
-        return original_text(self, xy, text, *args, **kwargs)
 
-    with patch.object(ImageDraw.ImageDraw, "text", _capture):
-        scene_renderer.render_scene_image(scene, _storyboard(), tmp_path / "hero.png")
+def test_episode_counter_is_derived_from_position_and_omitted_standalone(tmp_path):
+    scene = {"scene_type": "hero", "narration_text": "n", "kicker": "k"}
+    drawn, ctx = _capture_draws()
+    with ctx:
+        scene_renderer.render_scene_image(scene, _storyboard(title="T", _episode_position=(7, 25)), tmp_path / "a.png")
+    assert ("07 / 25", 32) in drawn
 
-    # The real, title-derived kicker is drawn (word-wrapped, so check
-    # by line rather than exact string equality).
-    assert any(kicker.rstrip("…") in t or t in kicker for t in drawn_texts)
-    # The full title is never drawn, at any size -- no duplication.
-    assert title not in drawn_texts
-    assert not any(title in t for t in drawn_texts)
-    # No invented replacement copy either -- the only title-area text
-    # drawn is the real kicker itself (word-wrapped lines of it), plus
-    # the storyboard's own unrelated chrome (taxonomy badge, source
-    # line) -- never a new phrase this renderer made up to fill the
-    # space the old supporting-title line used to occupy.
-    source_line = f"Source: {_storyboard()['source_name']}"
-    known_chrome = {"RESEARCH", source_line}
-    for text in drawn_texts:
-        assert text in kicker or kicker.startswith(text) or text in known_chrome
+    drawn, ctx = _capture_draws()
+    with ctx:
+        scene_renderer.render_scene_image(scene, _storyboard(title="T"), tmp_path / "b.png")
+    assert not any("/" in t for t, _ in drawn)
+
+
+def test_headline_is_fixed_size_and_capped_at_three_lines_with_ellipsis(tmp_path):
+    long_title = " ".join(["Extraordinarily"] * 60)
+    scene = {"scene_type": "hero", "narration_text": "n", "kicker": "k"}
+    drawn, ctx = _capture_draws()
+    with ctx:
+        scene_renderer.render_scene_image(scene, _storyboard(title=long_title), tmp_path / "long.png")
+    headline_draws = [t for t, size in drawn if size == scene_renderer.HEADLINE_FONT_SIZE]
+    assert any(t.endswith("\u2026") for t in headline_draws)
+    assert len(headline_draws) < 60
+    assert {size for t, size in drawn if "Extraordinarily" in t} == {scene_renderer.HEADLINE_FONT_SIZE}
+
+
+def test_fallback_window_used_when_no_real_asset_exists():
+    with patch.object(scene_renderer.visual_assets, "cached_visual", return_value=None):
+        window, kind = scene_renderer.story_visual_window(_storyboard(story_id=999999))
+    assert kind == "fallback"
+    assert window.size == (scene_renderer.WINDOW[2], scene_renderer.WINDOW[3])
+
+
+def test_real_photo_is_cover_cropped_without_distortion(tmp_path):
+    photo = tmp_path / "photo.png"
+    src = Image.new("RGB", (1600, 900), (10, 200, 10))
+    ImageDraw.Draw(src).ellipse([700, 350, 900, 550], fill=(255, 0, 0))
+    src.save(photo)
+    out = scene_renderer._window_photo(photo)
+    assert out.size == (scene_renderer.WINDOW[2], scene_renderer.WINDOW[3])
+    pts = [(x, y) for x in range(0, out.width, 8) for y in range(0, out.height, 8)
+           if out.getpixel((x, y))[0] > 200 and out.getpixel((x, y))[1] < 60]
+    xs, ys = zip(*pts)
+    assert abs((max(xs) - min(xs)) - (max(ys) - min(ys))) <= 24  # a circle stays a circle
+
+
+def test_layered_render_produces_transparent_window_hole_and_window_layer(tmp_path):
+    scene = {"scene_type": "hero", "narration_text": "n", "kicker": "k"}
+    with patch.object(scene_renderer.visual_assets, "cached_visual", return_value=None):
+        kind = scene_renderer.render_scene_layers(scene, _storyboard(title="Title", story_id=1),
+                                                  tmp_path / "card.png", tmp_path / "win.png")
+    assert kind == "fallback"
+    card = Image.open(tmp_path / "card.png")
+    assert card.mode == "RGBA" and card.size == (scene_renderer.SCENE_WIDTH, scene_renderer.SCENE_HEIGHT)
+    assert card.getpixel((scene_renderer.WINDOW[0] + 600, scene_renderer.WINDOW[1] + 100))[3] == 0
+    assert Image.open(tmp_path / "win.png").size == (scene_renderer.WINDOW[2], scene_renderer.WINDOW[3])
+    assert scene_renderer.render_scene_layers({"scene_type": "comparison"}, _storyboard(),
+                                              tmp_path / "c.png", tmp_path / "w.png") is None
 
 
 def test_key_fact_progression_scene_draws_both_stages_and_falls_back_without_them(tmp_path):
@@ -351,23 +349,18 @@ def test_icon_shapes_render_without_error(tmp_path):
         assert output_path.exists()
 
 
-def test_logo_placement_uses_the_brand_assets_abstraction_not_a_hardcoded_path(tmp_path, monkeypatch):
-    """
-    Swapping the resolved logo asset (as a future finalized-brand-asset
-    swap would) must require touching ONLY app.content.brand_assets --
-    proven here by monkeypatching just that module's function and
-    confirming the renderer picks it up with no changes of its own.
-    """
-    fake_logo = tmp_path / "fake_logo.png"
-    Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(fake_logo)
-    monkeypatch.setattr(brand_assets, "get_logo_asset_path", lambda: fake_logo)
-
-    scene = {"scene_type": "source_card", "closing_line": "Full story: Example"}
-    output_path = tmp_path / "source_card.png"
-
-    scene_renderer.render_scene_image(scene, _storyboard(), output_path)
-
-    assert output_path.exists()
+def test_card_mark_and_lockup_resolve_through_brand_assets_abstraction(tmp_path, monkeypatch):
+    """Swapping the finalized brand files must only require touching
+    app.content.brand_assets -- the card chrome picks the swap up."""
+    fake_mark = tmp_path / "fake_mark.png"
+    Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(fake_mark)
+    monkeypatch.setattr(brand_assets, "get_card_mark_path", lambda: fake_mark)
+    scene = {"scene_type": "hero", "narration_text": "n", "kicker": "k"}
+    out = tmp_path / "hero.png"
+    scene_renderer.render_scene_image(scene, _storyboard(title="T"), out)
+    px = Image.open(out).getpixel((scene_renderer.MARK_BOX[0] + 56, scene_renderer.MARK_BOX[1] + 56))
+    assert px[0] > 200 and px[1] < 60 and px[2] < 60
+    assert brand_assets.get_lockup_path().name == "5squarefeed-logo-primary.png"
 
 
 # ---------------------------------------------------------------------
@@ -448,3 +441,10 @@ def test_frame_sequence_without_states_is_unaffected_by_the_generalization(tmp_p
     assert len(segments) == 1
     assert "zoom" not in segments[0]
     assert segments[0]["duration"] == 3.0
+
+
+def test_statistic_headline_falls_back_to_title_for_dangling_entity_fragment():
+    scene = {"scene_type": "statistic", "stat": "140", "unit": "M", "entity": "To date and", "headline": "x"}
+    assert scene_renderer._headline_text(scene, _storyboard(title="Ema raises $77M")) == "Ema raises $77M"
+    ok = dict(scene, entity="Less cost vs. GPT-4.1.")
+    assert scene_renderer._headline_text(ok, _storyboard(title="T")) == "Less cost vs. GPT-4.1."

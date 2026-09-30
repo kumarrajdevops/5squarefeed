@@ -32,3 +32,18 @@ def get_logo_render_mode() -> str:
     only this function's return value changes.
     """
     return "cutout"
+
+
+# Story-card template assets (Episode template, see scene_renderer's
+# story card): the light icon tile (top-left mark on the light card) and
+# the finalized stacked primary lockup (intro/outro full-screen logo).
+_CARD_MARK_PATH = Path("app/dashboard/branding/icons/5squarefeed-icon-light.png")
+_LOCKUP_PATH = Path("app/dashboard/branding/logo/5squarefeed-logo-primary.png")
+
+
+def get_card_mark_path() -> Path:
+    return _CARD_MARK_PATH
+
+
+def get_lockup_path() -> Path:
+    return _LOCKUP_PATH

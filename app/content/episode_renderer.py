@@ -21,8 +21,8 @@ episode needs to exist. Two callers, zero duplication:
 Validated on Story #51 and Episode 3 (25 stories): light-icon watermark,
 real ASS captions (deterministic keyword emphasis, subordinate style
 during statistic scenes), a short (0.32s) dark xfade scene-to-scene
-transition within a story, a 0.6s dark gap + SFX between stories, one
-light-surface intro, one final episode outro, and a processed voice +
+transition within a story, a 0.6s left-to-right sweep transition (+ SFX tick) at every boundary
+(intro, between stories, outro), one light-surface intro, one final episode outro, and a processed voice +
 ducked music + restrained SFX master mix.
 
 Reuses real, already-validated production code UNCHANGED via import:
@@ -42,11 +42,14 @@ CWD once at import time -- `python build_episode.py --episode-id N` and
 the Celery task behave identically regardless of the shell's starting
 directory.
 """
+import hashlib
+import html
 import json
 import os
 import subprocess
 import sys
 import time
+from datetime import timezone
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -56,9 +59,13 @@ os.chdir(APP_ROOT)  # every reused function's relative MEDIA_ROOT = Path("media"
 
 from PIL import Image, ImageDraw, ImageFont
 
+from app.content import brand_assets, support_facts, visual_assets
 from app.content import scene_renderer as sr
 from app.content import storyboard_composer as sc
 from app.content.storyboard_service import ensure_storyboard
+from app.dates import today_ist
+from app.content.video_composer import get_audio_duration_seconds
+from app.content.voice_generator import VOICE_NAME, synthesize_voice
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, NewsItem
 from app.tasks.content import get_or_create_content
@@ -68,14 +75,37 @@ OUT_DIR = MEDIA / "pillow_enhanced"
 
 FPS = 25
 OUTPUT_W, OUTPUT_H = 1920, 1080
-SCENE_CANVAS = f"{sr.SCENE_WIDTH}x{sr.SCENE_HEIGHT}"
 
 SCENE_T = 8 / FPS      # 0.32s -- within-story scene-to-scene transition
-STORY_GAP = 0.6        # between-story interlude (hard-cut gap card + SFX/music swell), within spec's 0.5-1.5s
-INTRO_DUR, GAP_DUR = 1.8, 0.2
+STORY_GAP = 0.6        # between-story sweep transition slot (+ SFX tick), within spec's 0.5-1.5s
+# Every boundary (intro->story 1, story->story, last story->outro) is one
+# TRANSITION_DUR sweep clip in its own slot between the neighbouring clips.
+STORY_TRANSITION = "smoothright"   # xfade style: soft left-to-right sweep ("radial" = rotating wipe)
+# Spoken, captioned bumpers. INTRO_DUR/OUTRO_DUR are fixed so the dashboard's
+# jump-to-story offset (INTRO_LEAD_IN_SECONDS in app.js = INTRO_DUR + GAP_DUR)
+# never needs a per-episode probe; ensure_bumper_voice() refuses a voice that
+# would not fit.
+INTRO_DUR, GAP_DUR, OUTRO_DUR = 7.5, 0.6, 6.5
+OUTRO_GAP = 0.6        # last story -> outro transition slot
+BUMPER_TAIL = 0.3      # minimum silence left after the last word
+BUMPERS = {
+    "intro": {
+        "spoken": "Good morning! Welcome to Five square Feed. Today's top tech news.",
+        "captions": ["Good morning!", "Welcome to 5squareFeed.", "Today's top tech news."],
+        "lead": 0.6, "duration": INTRO_DUR,
+    },
+    "outro": {
+        "spoken": "Thanks for watching. See you tomorrow on Five square Feed.",
+        "captions": ["Thanks for watching.", "See you tomorrow on 5squareFeed."],
+        "lead": 1.0, "duration": OUTRO_DUR,
+    },
+}
+BUMPER_DIR = MEDIA / "audio" / "bumpers"
 
-LIGHT_ICON = APP_ROOT / "app/dashboard/branding/icons/5squarefeed-icon-light.png"
-LOGO_HORIZONTAL = APP_ROOT / "app/dashboard/branding/logo/5squarefeed-logo-horizontal.png"
+# Template output geometry of the visual window (sr.WINDOW scaled 2560x1440 -> 1920x1080).
+_K = OUTPUT_W / sr.SCENE_WIDTH
+WIN_X, WIN_Y = round(sr.WINDOW[0] * _K), round(sr.WINDOW[1] * _K)
+WIN_W, WIN_H = round(sr.WINDOW[2] * _K), round(sr.WINDOW[3] * _K)
 
 # Per-story narration processing chain -- shared UNCHANGED by both
 # render_episode()'s master mix (one voice file per story, each
@@ -87,12 +117,36 @@ VOICE_CHAIN = ("highpass=f=80,equalizer=f=3000:t=q:w=1:g=2,"
                "loudnorm=I=-16:TP=-1.5:LRA=7")
 
 
+def process_voice_file(raw: Path, out_path: Path) -> None:
+    run(["ffmpeg", "-y", "-i", str(raw), "-af", VOICE_CHAIN, "-ar", "44100", "-ac", "2", str(out_path)])
+
+
 def process_story_voice(story_id: int, out_path: Path) -> None:
     """Apply the one shared narration processing chain to a single
     story's raw edge-tts mp3. Same ffmpeg call used per-story inside
     render_episode()'s master mix and by render_story_standalone()."""
-    raw = MEDIA / "audio" / f"{story_id}.mp3"
-    run(["ffmpeg", "-y", "-i", str(raw), "-af", VOICE_CHAIN, "-ar", "44100", "-ac", "2", str(out_path)])
+    process_voice_file(MEDIA / "audio" / f"{story_id}.mp3", out_path)
+
+
+def ensure_bumper_voice(name: str) -> tuple[Path, list[dict]]:
+    """(raw mp3, caption cues in clip time) for the intro/outro greeting.
+    Synthesised once per distinct text+voice and cached, so every later render
+    is identical and offline. Cue times include the bumper's lead-in."""
+    spec = BUMPERS[name]
+    key = hashlib.sha1(f"{VOICE_NAME}|{spec['spoken']}".encode()).hexdigest()[:10]
+    mp3, meta = BUMPER_DIR / f"{name}_{key}.mp3", BUMPER_DIR / f"{name}_{key}.json"
+    if not (mp3.exists() and meta.exists()):
+        BUMPER_DIR.mkdir(parents=True, exist_ok=True)
+        segments = synthesize_voice(spec["spoken"], mp3)
+        meta.write_text(json.dumps({"segments": segments, "duration": get_audio_duration_seconds(mp3)}))
+    data = json.loads(meta.read_text())
+    if spec["lead"] + data["duration"] + BUMPER_TAIL > spec["duration"]:
+        raise ValueError(f"{name} greeting ({data['duration']:.2f}s) does not fit its {spec['duration']}s card")
+    segments = data["segments"]
+    texts = spec["captions"] if len(segments) == len(spec["captions"]) else [s["text"] for s in segments]
+    cues = [{"text": t, "start": spec["lead"] + s["start"], "end": spec["lead"] + s["end"]}
+            for t, s in zip(texts, segments)]
+    return mp3, cues
 
 
 def _mark_story_video_ready(db, story_id: int) -> None:
@@ -124,13 +178,13 @@ def _mark_story_video_ready(db, story_id: int) -> None:
     db.commit()
 
 
-def _render_and_mark_story(db, story_id: int, work: Path) -> tuple[Path, float]:
+def _render_and_mark_story(db, story_id: int, work: Path, position: tuple[int, int] | None = None) -> tuple[Path, float]:
     """One iteration of render_episode()'s story loop below, pulled out
     so the "render, THEN mark video_ready -- never the reverse, never
     on a raised exception" ordering is directly unit-testable without
     exercising the rest of render_episode() (intro/outro/audio mix/final
     mux)."""
-    clip, dur, _ = render_story_enhanced(story_id, tail_pad=0.0, work=work)
+    clip, dur, _ = render_story_enhanced(story_id, tail_pad=0.0, work=work, position=position)
     _mark_story_video_ready(db, story_id)
     return clip, dur
 
@@ -152,7 +206,11 @@ def load_episode_stories(episode_id: int) -> tuple[list[int], str]:
     """The exact same query production's own render path uses:
     EpisodeStory joined to NewsItem, filtered to selection_status ==
     "primary", ordered by rank_position ascending -- the DB's own stored
-    order, never re-ranked or filtered further here."""
+    order, never re-ranked or filtered further here.
+
+    The returned date string is the IST day the episode was made
+    (Episode.created_at), not the coverage day: Episode.episode_date stays
+    the coverage key that selection and its uniqueness constraint use."""
     with SessionLocal() as db:
         episode = db.get(Episode, episode_id)
         if episode is None:
@@ -170,7 +228,10 @@ def load_episode_stories(episode_id: int) -> tuple[list[int], str]:
         if not rows:
             raise ValueError(f"Episode {episode_id} has no primary stories selected.")
         story_ids = [es.story_id for es, _ in rows]
-        episode_date = episode.episode_date.strftime("%B %d, %Y")
+        made_at = episode.created_at
+        if made_at.tzinfo is None:
+            made_at = made_at.replace(tzinfo=timezone.utc)
+        episode_date = today_ist(made_at).strftime("%B %d, %Y")
     return story_ids, episode_date
 
 
@@ -204,52 +265,40 @@ def ensure_all_storyboards(story_ids: list[int]) -> dict:
 # ---------------------------------------------------------------------
 # Brand
 # ---------------------------------------------------------------------
-def repaint_watermark(png_path: Path) -> None:
-    img = Image.open(png_path).convert("RGBA")
-    icon = Image.open(LIGHT_ICON).convert("RGBA").resize((sr.LOGO_BADGE_SIZE, sr.LOGO_BADGE_SIZE))
-    pos = (sr.CONTENT_MARGIN_X, 90)
-    draw = ImageDraw.Draw(img)
-    draw.rectangle(
-        [pos[0] - 6, pos[1] - 6, pos[0] + sr.LOGO_BADGE_SIZE + 6, pos[1] + sr.LOGO_BADGE_SIZE + 6],
-        fill=sr.BACKGROUND_COLOR,
-    )
-    img.paste(icon, pos, icon)
-    img.convert("RGB").save(png_path, "PNG")
+INTRO_DATE_FONT = 44
+INTRO_DATE_GAP = 26
 
 
-def render_intro(output_path: Path, episode_date: str, story_count: int) -> None:
-    image = Image.new("RGB", (sr.SCENE_WIDTH, sr.SCENE_HEIGHT), (245, 246, 248))
-    logo = Image.open(LOGO_HORIZONTAL).convert("RGBA")
-    target_w = int(sr.SCENE_WIDTH * 0.6)
-    ratio = target_w / logo.width
-    logo = logo.resize((target_w, int(logo.height * ratio)))
-    x = (sr.SCENE_WIDTH - logo.width) // 2
-    y = int(sr.SCENE_HEIGHT * 0.34)
-    image.paste(logo, (x, y), logo)
-    draw = ImageDraw.Draw(image)
-    sub_text = f"{episode_date} — {story_count} Stories A Day"
-    sub_font = ImageFont.truetype(sr.FONT_REGULAR, 46)
-    w = draw.textlength(sub_text, font=sub_font)
-    draw.text(((sr.SCENE_WIDTH - w) // 2, y + logo.height + 44), sub_text, font=sub_font, fill=(90, 98, 115))
+def _render_lockup_card(output_path: Path, date_text: str = "") -> None:
+    """Intro/outro art: the finalized primary lockup, undistorted (uniform
+    scale only), on the vivid soft ground, raised and slightly reduced so the
+    bottom caption box never covers the tagline. `date_text`, when given, is
+    drawn bold just below the tagline (intro only)."""
+    image = sr.soft_background(vivid=True).convert("RGBA")
+    logo = Image.open(brand_assets.get_lockup_path()).convert("RGBA")
+    target_h = int(sr.SCENE_HEIGHT * 0.74)
+    logo = logo.resize((round(logo.width * target_h / logo.height), target_h), Image.LANCZOS)
+    top = int(sr.SCENE_HEIGHT * 0.03)
+    image.alpha_composite(logo, ((sr.SCENE_WIDTH - logo.width) // 2, top))
+    image = image.convert("RGB")
+    if date_text:
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(sr.FONT_BOLD, INTRO_DATE_FONT)
+        text = date_text.upper()
+        box = draw.textbbox((0, 0), text, font=font)
+        x = (sr.SCENE_WIDTH - (box[2] - box[0])) // 2 - box[0]
+        y = top + logo.height + INTRO_DATE_GAP - box[1]
+        draw.text((x, y), text, font=font, fill=sr.NAVY)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path, "PNG")
+
+
+def render_intro(output_path: Path, episode_date: str = "") -> None:
+    _render_lockup_card(output_path, episode_date)
 
 
 def render_outro(output_path: Path) -> None:
-    image, draw = sr._new_canvas()
-    accent = (64, 156, 255)
-    draw.rectangle([(0, 0), (sr.SCENE_WIDTH, 20)], fill=accent)
-    sr._draw_logo_badge(image, draw)
-    main_font = ImageFont.truetype(sr.FONT_BOLD, 76)
-    lines = sr._wrap_text(draw, "That's all for today's 5squareFeed.", main_font, sr.SCENE_WIDTH - sr.CONTENT_MARGIN_X * 2)
-    y = 560
-    for line in lines:
-        draw.text((sr.CONTENT_MARGIN_X, y), line, font=main_font, fill=sr.TEXT_COLOR)
-        y += 96
-    sub_font = ImageFont.truetype(sr.FONT_REGULAR, 44)
-    draw.text((sr.CONTENT_MARGIN_X, y + 20), "See you tomorrow.", font=sub_font, fill=sr.SOURCE_COLOR)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, "PNG")
+    _render_lockup_card(output_path)
 
 
 # ---------------------------------------------------------------------
@@ -268,89 +317,140 @@ def ass_time(t: float) -> str:
     return f"{h:d}:{m:02d}:{s:05.2f}"
 
 
+# Caption typography -- one fixed system for every caption in every story.
+# Sizes are libass px at 1920x1080; libass renders DejaVu ~0.86x the PIL pixel
+# size for the same number, so wrapping measures at the calibrated PIL size.
+CAPTION_FONT = 36
+CAPTION_SUB_FONT = 30          # statistic scenes: the big number is primary
+CAPTION_MAX_LINES = 2
+CAPTION_MAX_WIDTH = 1400       # PIL px per line at the calibrated size
+CAPTION_MARGIN_V = 110
+_LIBASS_TO_PIL = 0.86
+_CAPTION_BOX = "{:02X}{:02X}{:02X}".format(*reversed(sr.NAVY))     # BGR
+_MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+
+def _ass_box(alpha: int) -> str:
+    return f"&H{alpha:02X}{_CAPTION_BOX}&"
+
+
 def _ass_header() -> str:
+    text_main = ass_color((246, 248, 252), alpha=0x14)
+    text_sub = ass_color((246, 248, 252), alpha=0x38)
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {OUTPUT_W}
 PlayResY: {OUTPUT_H}
+WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,40,{ass_color(sr.TEXT_COLOR)},{ass_color(sr.TEXT_COLOR)},&H000000&,&H80000000&,-1,0,0,0,100,100,0,0,1,2,0,2,120,120,60,1
-Style: Subordinate,DejaVu Sans,30,{ass_color(sr.TEXT_COLOR, alpha=0x60)},{ass_color(sr.TEXT_COLOR, alpha=0x60)},&H000000&,&H80000000&,-1,0,0,0,100,100,0,0,1,2,0,2,120,120,60,1
+Style: Default,DejaVu Sans,{CAPTION_FONT},{text_main},{text_main},&HFF000000&,&HFF000000&,0,0,0,0,100,100,0,0,1,0,0,2,240,240,{CAPTION_MARGIN_V},1
+Style: Subordinate,DejaVu Sans,{CAPTION_SUB_FONT},{text_sub},{text_sub},&HFF000000&,&HFF000000&,0,0,0,0,100,100,0,0,1,0,0,2,240,240,{CAPTION_MARGIN_V},1
+Style: BoxDefault,DejaVu Sans,20,{_ass_box(0x52)},{_ass_box(0x52)},&HFF000000&,&HFF000000&,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: BoxSubordinate,DejaVu Sans,20,{_ass_box(0x78)},{_ass_box(0x78)},&HFF000000&,&HFF000000&,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-def build_emphasis_set(scene: dict, storyboard: dict) -> set:
-    tokens = set()
-    for key in ("stat", "tier", "date", "source", "entity", "company", "product"):
-        v = scene.get(key)
-        if v:
-            tokens.add(str(v).lower())
-    if storyboard.get("source_name"):
-        tokens.add(storyboard["source_name"].lower())
-    return tokens
+def caption_lines(text: str, style: str) -> list[str]:
+    size = CAPTION_SUB_FONT if style == "Subordinate" else CAPTION_FONT
+    font = ImageFont.truetype(sr.FONT_REGULAR, round(size * _LIBASS_TO_PIL))
+    return sr._wrap_text(_MEASURE, text, font, CAPTION_MAX_WIDTH)
 
 
-def is_emphasized(word: str, emphasis_set: set) -> bool:
-    clean = word.strip(".,;:()\"'—").strip()
-    if not clean:
-        return False
-    if any(ch.isdigit() for ch in clean):
-        return True
-    return clean.lower() in emphasis_set
+def split_caption_cue(cue: dict, style: str) -> list[dict]:
+    """One narration cue -> display cues of at most CAPTION_MAX_LINES lines.
+    Every word is kept in order; a cue that needs several pages shares its own
+    real time span between them in proportion to their length."""
+    text = html.unescape(cue["text"])
+    lines = caption_lines(text, style)
+    pages = [lines[i:i + CAPTION_MAX_LINES] for i in range(0, len(lines), CAPTION_MAX_LINES)] or [[text]]
+    weights = [sum(len(line) for line in page) for page in pages]
+    span, cursor, out = cue["end"] - cue["start"], cue["start"], []
+    for page, weight in zip(pages, weights):
+        end = cursor + span * weight / sum(weights)
+        out.append({"lines": page, "start": cursor, "end": end, "style": style})
+        cursor = end
+    out[-1]["end"] = cue["end"]
+    return out
 
 
-def caption_dialogue_line(cue_text: str, start: float, end: float, style: str, emphasis_set: set) -> str:
-    """One ASS Dialogue line per real caption cue (from storyboard_composer's
-    own tested clause-boundary splitter). No per-word timing available at
-    episode scale (would need a fresh edge-tts WordBoundary fetch per
-    story) -- static deterministic keyword-colour emphasis + a plain
-    fade-in/out instead of per-word karaoke, which is explicitly allowed
-    ("kinetic captioning kept light... word highlight/opacity/weight/color")."""
-    wrapped = sc._wrap_caption_text(cue_text)
-    lines_out = []
-    for line in wrapped.split("\n"):
-        words_out = []
-        for w in line.split(" "):
-            if is_emphasized(w, emphasis_set):
-                words_out.append(f"{{\\c{ass_color((5, 216, 252))}}}{w}{{\\c{ass_color(sr.TEXT_COLOR)}}}")
-            else:
-                words_out.append(w)
-        lines_out.append(" ".join(words_out))
-    text = "\\N".join(lines_out)
-    return f"Dialogue: 0,{ass_time(start)},{ass_time(end)},{style},,0,0,0,,{{\\fad(80,80)}}{text}\n"
+CAPTION_PAD_X, CAPTION_PAD_Y, CAPTION_RADIUS = 24, 9, 12
+
+
+def _caption_box_path(lines: list[str], style: str) -> tuple[float, float, str]:
+    """(x, y, ASS drawing) of ONE rounded box behind the whole cue, sized from
+    the same PIL measurement that decided the line breaks (libass line height
+    equals the font size)."""
+    size = CAPTION_SUB_FONT if style == "Subordinate" else CAPTION_FONT
+    font = ImageFont.truetype(sr.FONT_REGULAR, size * _LIBASS_TO_PIL)
+    width = max(_MEASURE.textlength(line, font=font) for line in lines) * 1.01 + 2 * CAPTION_PAD_X
+    height = size * len(lines) + 2 * CAPTION_PAD_Y
+    x, y = (OUTPUT_W - width) / 2, OUTPUT_H - CAPTION_MARGIN_V - size * len(lines) - CAPTION_PAD_Y
+    w, h, r = round(width), round(height), CAPTION_RADIUS
+    path = (f"m {r} 0 l {w - r} 0 b {w} 0 {w} 0 {w} {r} l {w} {h - r} b {w} {h} {w} {h} {w - r} {h} "
+            f"l {r} {h} b 0 {h} 0 {h} 0 {h - r} l 0 {r} b 0 0 0 0 {r} 0")
+    return x, y, path
+
+
+CAPTION_JOIN_GAP = 0.15
+
+
+def caption_dialogue_line(lines: list[str], start: float, end: float, style: str,
+                          fade_in: bool = True, fade_out: bool = True) -> str:
+    """Two ASS events per display cue: one translucent rounded box behind the
+    whole cue (a per-line libass box double-darkens where lines overlap) and
+    the plain single-weight text above it. Both fade only at the outer edges
+    of a run of adjacent cues, so a cue-to-cue change is a clean swap."""
+    x, y, path = _caption_box_path(lines, style)
+    stamp = f"{ass_time(start)},{ass_time(end)}"
+    fad = f"\\fad({80 if fade_in else 0},{80 if fade_out else 0})"
+    box = f"Dialogue: 0,{stamp},Box{style},,0,0,0,,{{{fad}\\pos({x:.1f},{y:.1f})\\p1}}{path}{{\\p0}}\n"
+    text = "\\N".join(lines)
+    return box + f"Dialogue: 1,{stamp},{style},,0,0,0,,{{{fad}}}{text}\n"
+
+
+def caption_events(cues: list[dict]) -> str:
+    """ASS events for time-ordered display cues: no two cues overlap and a cue
+    that follows another within CAPTION_JOIN_GAP swaps in without fading."""
+    out, prev_end = "", None
+    for i, c in enumerate(cues):
+        start = c["start"] if prev_end is None else max(c["start"], prev_end)
+        if start >= c["end"]:
+            continue
+        joined_in = prev_end is not None and start - prev_end < CAPTION_JOIN_GAP
+        nxt = cues[i + 1]["start"] if i + 1 < len(cues) else None
+        joined_out = nxt is not None and nxt - c["end"] < CAPTION_JOIN_GAP
+        out += caption_dialogue_line(c["lines"], start, c["end"], c["style"], not joined_in, not joined_out)
+        prev_end = c["end"]
+    return out
 
 
 # ---------------------------------------------------------------------
 # Per-scene render + encode (reuses real production renderers/motion)
 # ---------------------------------------------------------------------
 def build_segments_for_scene(scene: dict, storyboard: dict, work_dir: Path) -> list[dict]:
+    """Visual-window frames (2400x752 PNGs, window_only) for a scene whose
+    window content is animated data (statistic count-up, comparison, stage
+    pills). The card chrome and text are composited later, in one pass."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    if scene["scene_type"] in sr._COUNTUP_CAPABLE_TYPES:
-        segments = sr.render_scene_frame_sequence(scene, storyboard, work_dir, fps=FPS)
-    else:
+    with sr.window_only():
+        if scene["scene_type"] in sr._COUNTUP_CAPABLE_TYPES:
+            return sr.render_scene_frame_sequence(scene, storyboard, work_dir, fps=FPS)
         png = work_dir / "frame.png"
         sr.render_scene_image(scene, storyboard, png)
-        segments = [{"duration": scene["duration"], "frame_paths": [png], "is_ramp": False}]
-    for seg in segments:
-        for p in seg["frame_paths"]:
-            repaint_watermark(p)
-    return segments
+    return [{"duration": scene["duration"], "frame_paths": [png], "is_ramp": False}]
 
 
-def encode_segments(segments: list[dict], motion: dict, out_path: Path, pad: float = 0.0) -> None:
-    """`pad` extends this clip's OWN encoded duration beyond the scene's
-    real duration -- required so the outer xfade_chain's offset math (which
-    assumes this padded length) matches what actually got encoded; without
-    this the crossfade's offset overruns the real content and truncates it
-    (found live: story 122's hero scene was being cut down from 3.6s to
-    effectively nothing because only the un-padded duration was encoded)."""
-    zoom_expr, x_expr, y_expr = sc._zoompan_expr(motion or {})
+def encode_segments(segments: list[dict], out_path: Path, pad: float = 0.0, size: tuple = (WIN_W, WIN_H)) -> None:
+    """Window-sized intermediate clip for a multi-frame scene (count-up ramps).
+    `pad` extends the encoded duration beyond the scene's real duration --
+    required so the outer crossfade's offset math (which assumes the padded
+    length) matches what actually got encoded. Explicit -t per CLAUDE.md #4."""
     segments = [dict(s) for s in segments]
     if pad > 0.001 and segments:
         last = segments[-1]
@@ -359,7 +459,7 @@ def encode_segments(segments: list[dict], motion: dict, out_path: Path, pad: flo
         else:
             segments[-1] = dict(last)
             segments[-1]["duration"] = last["duration"] + pad
-    inputs, filters, idx = [], [], 0
+    inputs, filters, idx, total = [], [], 0, 0.0
     for seg in segments:
         dur = seg["duration"]
         if dur <= 0.02:
@@ -369,38 +469,55 @@ def encode_segments(segments: list[dict], motion: dict, out_path: Path, pad: flo
             inputs += ["-framerate", str(FPS), "-i", str(seq_dir / "frame_%05d.png")]
         else:
             inputs += ["-loop", "1", "-framerate", str(FPS), "-t", str(dur), "-i", str(seg["frame_paths"][0])]
-        filters.append(
-            f"[{idx}:v]scale={SCENE_CANVAS},"
-            f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d=1:s={OUTPUT_W}x{OUTPUT_H}:fps={FPS},setsar=1[v{idx}]"
-        )
+        filters.append(f"[{idx}:v]scale={size[0]}:{size[1]}:flags=lanczos,fps={FPS},setsar=1[v{idx}]")
+        total += dur
         idx += 1
     concat_in = "".join(f"[v{i}]" for i in range(idx))
     filter_complex = ";".join(filters) + f";{concat_in}concat=n={idx}:v=1:a=0[vout]"
-    cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-map", "[vout]",
-           "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p", str(out_path)]
-    run(cmd)
+    run(["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-map", "[vout]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", "-t", f"{total:.3f}", str(out_path)])
 
 
-def xfade_chain(clips: list[Path], durations: list[float], out_path: Path, transition_s: float) -> None:
-    n = len(clips)
-    if n == 1:
-        run(["ffmpeg", "-y", "-i", str(clips[0]), "-c", "copy", str(out_path)])
-        return
-    cmd = ["ffmpeg", "-y"]
-    for c in clips:
-        cmd += ["-i", str(c)]
-    filters = []
-    prev = "0"
-    cumulative = durations[0]
-    for i in range(1, n):
-        offset = cumulative - transition_s
-        outlbl = f"x{i}"
-        filters.append(f"[{prev}][{i}:v]xfade=transition=fade:duration={transition_s}:offset={offset}[{outlbl}]")
-        prev = outlbl
-        cumulative += durations[i] - transition_s
-    cmd += ["-filter_complex", ";".join(filters), "-map", f"[{prev}]",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)]
-    run(cmd)
+# Headline/support text is composited above the crossfaded imagery. When a
+# scene change swaps the text, the outgoing text fades out and the incoming
+# text fades in one after the other (never overlapping), inside the 0.32s
+# crossfade -- so no headline ever ghosts through another.
+TEXT_FADE = 0.12
+TEXT_LEAD = 0.04
+
+
+def text_runs(keys: list, starts: list[float], ends: list[float]) -> list[dict]:
+    """Consecutive scenes with identical text share one run (no flicker)."""
+    runs: list[dict] = []
+    for i, key in enumerate(keys):
+        if runs and runs[-1]["key"] == key:
+            runs[-1]["end"] = ends[i]
+        else:
+            runs.append({"key": key, "first": i, "start": starts[i], "end": ends[i]})
+    return runs
+
+
+def still(duration: float) -> str:
+    """Filter-graph replacement for `-loop 1 -t D -i image`. A looped image input
+    gets its own decode thread that races ahead of the encoder and buffers
+    frames without bound (a 140s story exhausted 8 GB of RAM); a one-frame input
+    repeated by `loop` is pulled on demand, so memory stays flat at any length."""
+    return f"loop=loop=-1:size=1,setpts=N/({FPS}*TB),trim=duration={duration:.3f},setpts=PTS-STARTPTS"
+
+
+def text_layer_filter(src: int, label: str, run: dict, is_first: bool, is_last: bool,
+                      hold: float | None = None) -> tuple[str, str]:
+    """(filter for the text input, overlay enable expression). `hold` = how long
+    the single-frame text image is held (the story length)."""
+    chain = [still(hold)] if hold is not None else []
+    chain.append("format=rgba")
+    if not is_first:
+        chain.append(f"fade=t=in:st={run['start'] + TEXT_LEAD + TEXT_FADE:.3f}:d={TEXT_FADE}:alpha=1")
+    if not is_last:
+        chain.append(f"fade=t=out:st={run['end'] + TEXT_LEAD:.3f}:d={TEXT_FADE}:alpha=1")
+    lo = 0.0 if is_first else run["start"] + TEXT_LEAD + TEXT_FADE - 0.02
+    hi = 1e6 if is_last else run["end"] + TEXT_LEAD + TEXT_FADE + 0.02
+    return f"[{src}:v]{','.join(chain)}[{label}]", f"between(t,{lo:.3f},{hi:.3f})"
 
 
 def hard_cut_concat(clips: list[Path], out_path: Path, work_dir: Path) -> None:
@@ -423,60 +540,151 @@ def hard_cut_concat(clips: list[Path], out_path: Path, work_dir: Path) -> None:
 # muxes exactly one), so audio is intentionally left to the caller rather
 # than baked in here, which would force a duplicate mixing implementation.
 # ---------------------------------------------------------------------
-def render_story_enhanced(story_id: int, tail_pad: float, work: Path) -> tuple[Path, float, list[dict]]:
+def render_story_enhanced(story_id: int, tail_pad: float, work: Path,
+                          position: tuple[int, int] | None = None) -> tuple[Path, float, list[dict]]:
+    """`position` = (rank, total) inside an episode, drawn as the card's
+    "NN / TT" counter; None (standalone render) omits the counter rather
+    than showing a fabricated one.
+
+    Per story: one card (chrome + headline/support plates) held constant, a
+    crossfaded visual-window stream underneath it, headline/support text and
+    ASS captions above it -- all composited and encoded in a single ffmpeg pass."""
     story_dir = work / f"story_{story_id}"
     story_dir.mkdir(parents=True, exist_ok=True)
     storyboard = json.loads((MEDIA / "storyboard" / str(story_id) / "storyboard.json").read_text())
+    storyboard["_episode_position"] = position
+    storyboard["_support"] = support_facts.load_support_info(story_id)
+    visual_assets.ensure_story_visual(story_id)  # cache hit after the episode's asset pre-pass
     scenes = [s for s in storyboard["scenes"] if s["scene_type"] != "source_card"]
 
-    clip_paths, clip_durations, cue_info = [], [], []
-    cursor = 0.0
+    inputs: list[str] = []
+    n_inputs = 0
+
+    def add_input(*args: str) -> int:
+        nonlocal n_inputs
+        inputs.extend(args)
+        n_inputs += 1
+        return n_inputs - 1
+
+    total = sum(s["duration"] for s in scenes) + tail_pad
+    filters: list[str] = []
+    cue_info, scene_meta, cursors, ends, head_keys, supp_keys, parts_by_scene = [], [], [], [], [], [], []
+    cursor, window_png, window_kind = 0.0, None, None
+    base_path = story_dir / "base.png"
     for i, scene in enumerate(scenes):
-        segs = build_segments_for_scene(scene, storyboard, story_dir / f"scene_{i}")
-        clip_path = story_dir / f"scene_{i}.mp4"
-        is_last = i == len(scenes) - 1
-        pad = tail_pad if is_last else SCENE_T
-        encode_segments(segs, scene.get("motion"), clip_path, pad=pad)
-        dur = scene["duration"] + pad
-        clip_paths.append(clip_path)
-        clip_durations.append(dur)
+        pad = tail_pad if i == len(scenes) - 1 else SCENE_T
+        d = scene["duration"] + pad
+        scene_dir = story_dir / f"scene_{i}"
+        scene_dir.mkdir(parents=True, exist_ok=True)
 
-        cues = sc._caption_cues(scene)
+        if sr.uses_story_visual(scene):
+            if window_png is None:
+                window, window_kind = sr.story_visual_window(storyboard)
+                window_png = story_dir / "window.png"
+                window.save(window_png, "PNG")
+            src = add_input("-i", str(window_png))
+            filters.append(f"[{src}:v]{still(d)},scale={WIN_W}:{WIN_H}:flags=lanczos,fps={FPS},setsar=1,format=yuv420p[w{i}]")
+            motion = "static"
+            visual = window_kind
+        else:
+            segs = build_segments_for_scene(scene, storyboard, scene_dir)
+            if len(segs) == 1 and not segs[0]["is_ramp"]:
+                src = add_input("-i", str(segs[0]["frame_paths"][0]))
+                filters.append(f"[{src}:v]{still(d)},scale={WIN_W}:{WIN_H}:flags=lanczos,fps={FPS},setsar=1,format=yuv420p[w{i}]")
+                motion = "static"
+            else:
+                clip = scene_dir / "window.mp4"
+                encode_segments(segs, clip, pad=pad)
+                src = add_input("-i", str(clip))
+                filters.append(f"[{src}:v]fps={FPS},setsar=1,format=yuv420p[w{i}]")
+                motion = "countup"
+            visual = "data"
+        scene_meta.append({"index": i, "scene_type": scene["scene_type"], "visual": visual, "motion": motion, "duration": scene["duration"]})
+
+        parts = sr.render_card_parts(scene, storyboard, scene_dir, _K, base_path)
+        parts_by_scene.append(parts)
+        head_keys.append(parts["key"][0])
+        supp_keys.append(parts["key"][1:])
+
         style = "Subordinate" if scene["scene_type"] == "statistic" else "Default"
-        emphasis = build_emphasis_set(scene, storyboard)
-        for cue in cues:
-            cue_info.append({
-                "text": cue["text"], "start": cursor + cue["start"], "end": cursor + cue["end"],
-                "style": style, "emphasis": emphasis,
-            })
+        for cue in sc._caption_cues(scene):
+            for shown in split_caption_cue({"text": cue["text"], "start": cursor + cue["start"], "end": cursor + cue["end"]}, style):
+                cue_info.append(shown)
+        cursors.append(cursor)
         cursor += scene["duration"]
+        ends.append(cursor)
+    ends[-1] = total
 
-    silent_path = story_dir / "silent.mp4"
-    xfade_chain(clip_paths, clip_durations, silent_path, transition_s=SCENE_T)
+    # imagery: crossfaded window stream
+    prev = "w0"
+    for i in range(1, len(scenes)):
+        filters.append(f"[{prev}][w{i}]xfade=transition=fade:duration={SCENE_T}:offset={cursors[i]:.3f}[x{i}]")
+        prev = f"x{i}"
+    filters.append(f"[{prev}]pad={OUTPUT_W}:{OUTPUT_H}:{WIN_X}:{WIN_Y}:color=white,format=yuv420p[stream]")
+
+    # constant card (chrome + plates) above the imagery
+    base_in = add_input("-i", str(base_path))
+    filters.append(f"[{base_in}:v]{still(total)},format=rgba[base]")
+    filters.append("[stream][base]overlay=0:0:format=auto[card]")
+
+    # headline + support text, faded so consecutive texts never overlap
+    current = "card"
+    for layer, keys in (("headline", head_keys), ("support", supp_keys)):
+        runs = text_runs(keys, cursors, ends)
+        for r, run_ in enumerate(runs):
+            png = parts_by_scene[run_["first"]][layer]
+            x, y = parts_by_scene[run_["first"]][f"{layer}_xy"]
+            src = add_input("-i", str(png))
+            label = f"t_{layer}{r}"
+            text_filter, enable = text_layer_filter(src, label, run_, r == 0, r == len(runs) - 1, hold=total)
+            filters.append(text_filter)
+            filters.append(f"[{current}][{label}]overlay={x}:{y}:enable='{enable}':format=auto[o_{layer}{r}]")
+            current = f"o_{layer}{r}"
 
     ass_text = _ass_header()
-    for c in cue_info:
-        ass_text += caption_dialogue_line(c["text"], c["start"], c["end"], c["style"], c["emphasis"])
+    ass_text += caption_events(cue_info)
     ass_path = story_dir / "story.ass"
-    ass_path.write_text(ass_text)
+    ass_path.write_text(ass_text, encoding="utf-8")
+    filters.append(f"[{current}]ass={ass_path},format=yuv420p[vout]")
 
     captioned_path = story_dir / "captioned.mp4"
-    run(["ffmpeg", "-y", "-i", str(silent_path), "-vf", f"ass={ass_path}",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(captioned_path)])
+    run(["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filters), "-map", "[vout]",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(FPS), "-t", f"{total:.3f}", str(captioned_path)])
 
-    net_duration = cursor  # sum of real scene durations, tail_pad cancels via the outer chain's own eat
-    return captioned_path, net_duration, cue_info
+    (story_dir / "render_meta.json").write_text(json.dumps({
+        "story_id": story_id, "total": total, "scenes": scene_meta,
+        "caption_max_lines": max((len(c["lines"]) for c in cue_info), default=0),
+        "headline_runs": len(text_runs(head_keys, cursors, ends)),
+        "headlines": list(head_keys),
+    }, indent=1))
+    return captioned_path, cursor, cue_info
 
 
-def make_gap_clip(out_path: Path, duration: float) -> None:
-    bg_hex = "0x{:02X}{:02X}{:02X}".format(*sr.BACKGROUND_COLOR)
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={bg_hex}:s={OUTPUT_W}x{OUTPUT_H}:r={FPS}:d={duration}",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+def make_transition_clip(prev_clip: Path, next_clip: Path, out_path: Path, duration: float) -> None:
+    """Sweep from the outgoing clip's last frame to the incoming clip's first
+    frame, inside its own `duration` slot (so neighbours and the timeline are
+    untouched). Stills are held in the filter graph, never looped inputs (rule 12)."""
+    last_png, first_png = out_path.with_name(out_path.stem + "_a.png"), out_path.with_name(out_path.stem + "_b.png")
+    run(["ffmpeg", "-y", "-sseof", "-0.2", "-i", str(prev_clip), "-update", "1", "-q:v", "1", str(last_png)])
+    run(["ffmpeg", "-y", "-i", str(next_clip), "-frames:v", "1", str(first_png)])
+    fmt = f"scale={OUTPUT_W}:{OUTPUT_H}:flags=lanczos,fps={FPS},setsar=1,format=yuv420p"
+    run(["ffmpeg", "-y", "-i", str(last_png), "-i", str(first_png), "-filter_complex",
+         f"[0:v]{still(duration)},{fmt}[a];[1:v]{still(duration)},{fmt}[b];"
+         f"[a][b]xfade=transition={STORY_TRANSITION}:duration={duration}:offset=0,format=yuv420p[v]",
+         "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(FPS),
+         "-frames:v", str(round(duration * FPS)), str(out_path)])
 
 
-def make_card_clip(png_path: Path, duration: float, out_path: Path) -> None:
-    run(["ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-t", str(duration), "-i", str(png_path),
-         "-vf", f"scale={OUTPUT_W}:{OUTPUT_H},format=yuv420p", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+def make_bumper_clip(png_path: Path, duration: float, cues: list[dict], out_path: Path) -> None:
+    """Intro/outro card with burned captions (same ASS look as story captions).
+    The still is held in the filter graph, never a looped input (rule 12)."""
+    pages = [p for cue in cues for p in split_caption_cue(cue, "Default")]
+    ass_path = out_path.with_suffix(".ass")
+    ass_path.write_text(_ass_header() + caption_events(pages), encoding="utf-8")
+    run(["ffmpeg", "-y", "-i", str(png_path), "-filter_complex",
+         f"[0:v]{still(duration)},scale={OUTPUT_W}:{OUTPUT_H}:flags=lanczos,fps={FPS},ass={ass_path},format=yuv420p[v]",
+         "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(FPS), "-t", f"{duration:.3f}",
+         str(out_path)])
 
 
 # ---------------------------------------------------------------------
@@ -501,6 +709,16 @@ def render_episode(episode_id: int) -> dict:
     if preflight["regenerated"]:
         log(f"regenerated story IDs: {preflight['regenerated']}")
 
+    log("sourcing real visuals for all stories (cached results reused, never refetched)")
+    stage_start = time.time()
+    visual_summary = []
+    for story_id in story_ids:
+        prov = visual_assets.ensure_story_visual(story_id)
+        visual_summary.append({"story_id": story_id, "kind": prov.get("kind"), "cached": bool(prov.get("cached"))})
+    timings["asset_retrieval_s"] = round(time.time() - stage_start, 1)
+    log(f"visuals ready: { {k: sum(1 for v in visual_summary if v['kind'] == k) for k in ('photo', 'logo', 'fallback')} } "
+        f"({timings['asset_retrieval_s']:.1f}s)")
+
     stage_start = time.time()
     story_durations, story_clips = [], []
     with SessionLocal() as db:
@@ -513,7 +731,7 @@ def render_episode(episode_id: int) -> dict:
             # left it, never marked video_ready. Every story handled in
             # an earlier iteration already had its own commit, so it
             # stays marked regardless of a later story's failure.
-            clip, dur = _render_and_mark_story(db, story_id, work)
+            clip, dur = _render_and_mark_story(db, story_id, work, position=(idx + 1, len(story_ids)))
             story_clips.append(clip)
             story_durations.append(dur)
     timings["story_render_s"] = round(time.time() - stage_start, 1)
@@ -521,27 +739,24 @@ def render_episode(episode_id: int) -> dict:
 
     stage_start = time.time()
     intro_png = work / "intro.png"
-    render_intro(intro_png, episode_date, len(story_ids))
+    render_intro(intro_png, episode_date)
     intro_clip = work / "s_intro.mp4"
-    make_card_clip(intro_png, INTRO_DUR, intro_clip)
-
-    gap_clip = work / "s_gap.mp4"
-    make_gap_clip(gap_clip, GAP_DUR)
-
-    story_gap_clip = work / "s_story_gap.mp4"
-    make_gap_clip(story_gap_clip, STORY_GAP)
+    intro_mp3, intro_cues = ensure_bumper_voice("intro")
+    make_bumper_clip(intro_png, INTRO_DUR, intro_cues, intro_clip)
 
     outro_png = work / "outro.png"
     render_outro(outro_png)
     outro_clip = work / "s_outro.mp4"
-    make_card_clip(outro_png, 3.0, outro_clip)
+    outro_mp3, outro_cues = ensure_bumper_voice("outro")
+    make_bumper_clip(outro_png, OUTRO_DUR, outro_cues, outro_clip)
 
-    sequence = [intro_clip, gap_clip]
-    for i, clip in enumerate(story_clips):
-        sequence.append(clip)
-        if i != len(story_clips) - 1:
-            sequence.append(story_gap_clip)
-    sequence.append(outro_clip)
+    boundaries = [intro_clip, *story_clips, outro_clip]
+    durations = [GAP_DUR, *([STORY_GAP] * (len(story_clips) - 1)), OUTRO_GAP]
+    sequence = [intro_clip]
+    for i, dur in enumerate(durations):
+        transition = work / f"s_transition_{i}.mp4"
+        make_transition_clip(boundaries[i], boundaries[i + 1], transition, dur)
+        sequence += [transition, boundaries[i + 1]]
 
     silent_final = OUT_DIR / f"episode_{episode_id}_pillow_enhanced_silent.mp4"
     hard_cut_concat(sequence, silent_final, work)
@@ -554,9 +769,11 @@ def render_episode(episode_id: int) -> dict:
     stage_start = time.time()
     log("audio mix")
 
-    voice_offsets_ms = []
+    intro_voice = work / "voice_intro.wav"
+    process_voice_file(intro_mp3, intro_voice)
+    voice_offsets_ms = [round(BUMPERS["intro"]["lead"] * 1000)]
     cursor = INTRO_DUR + GAP_DUR
-    processed_voice_paths = []
+    processed_voice_paths = [intro_voice]
     for i, story_id in enumerate(story_ids):
         processed = work / f"voice_{story_id}.wav"
         process_story_voice(story_id, processed)
@@ -571,6 +788,11 @@ def render_episode(episode_id: int) -> dict:
         check=True, capture_output=True, text=True,
     )
     total_duration = float(probe.stdout.strip())
+
+    outro_voice = work / "voice_outro.wav"
+    process_voice_file(outro_mp3, outro_voice)
+    processed_voice_paths.append(outro_voice)
+    voice_offsets_ms.append(round((total_duration - OUTRO_DUR + BUMPERS["outro"]["lead"]) * 1000))
 
     filt, voice_labels = [], []
     for i, p in enumerate(processed_voice_paths):
@@ -623,8 +845,13 @@ def render_episode(episode_id: int) -> dict:
             f.writeframes(pcm.tobytes())
 
     write_wav(work / "music_bed.wav", pad(total_duration, [110.0, 164.81, 220.0, 277.18, 329.63]))
-    write_wav(work / "sfx_intro.wav", np.concatenate([tone(523.25, 0.22), np.zeros(int(0.05 * SR)), tone(783.99, 0.30)]))
-    write_wav(work / "sfx_story_gap.wav", tone(660.0, 0.18, amp=0.12, a=0.01, r=0.10))
+    # Soft "glass ping" at every sweep boundary (user pick "04" from the sample page;
+    # the earlier 660 Hz sine tick was `tone(660.0, 0.18, amp=0.12, a=0.01, r=0.10)`).
+    ping_t = np.arange(int(0.8 * SR)) / SR
+    ping = (np.sin(2 * np.pi * 1318.5 * ping_t) + 0.3 * np.sin(2 * np.pi * 2637.0 * ping_t)
+            + 0.12 * np.sin(2 * np.pi * 3951.0 * ping_t)) * np.exp(-ping_t / 0.16)
+    ping[: int(0.004 * SR)] *= np.linspace(0, 1, int(0.004 * SR))
+    write_wav(work / "sfx_story_gap.wav", ping / np.max(np.abs(ping)) * 0.15)
 
     run(["ffmpeg", "-y", "-i", str(work / "music_bed.wav"), "-af", f"apad=whole_dur={total_duration}",
          "-t", str(total_duration), "-ar", "44100", "-ac", "2", str(work / "music_full.wav")])
@@ -634,20 +861,19 @@ def render_episode(episode_id: int) -> dict:
         f"[{music_input_idx}:a][voices_duck]sidechaincompress=threshold=0.02:ratio=8:attack=25:release=400:makeup=1[ducked]"
     )
 
-    gap_starts_ms = []
+    gap_starts_ms = [round(INTRO_DUR * 1000)]
     c = INTRO_DUR + GAP_DUR
     for i in range(len(story_ids) - 1):
         c += story_durations[i]
         gap_starts_ms.append(round(c * 1000))
         c += STORY_GAP
+    gap_starts_ms.append(round((total_duration - OUTRO_DUR - OUTRO_GAP) * 1000))
 
-    sfx_inputs = ["-i", str(work / "sfx_intro.wav")]
+    sfx_inputs = []
     sfx_labels = []
-    filt.append(f"[{n_voices + 1}:a]adelay=0:all=1[sfx0]")
-    sfx_labels.append("[sfx0]")
     for j, ms in enumerate(gap_starts_ms):
         sfx_inputs += ["-i", str(work / "sfx_story_gap.wav")]
-        filt.append(f"[{n_voices + 2 + j}:a]adelay={ms}:all=1[sfxg{j}]")
+        filt.append(f"[{n_voices + 1 + j}:a]adelay={ms}:all=1[sfxg{j}]")
         sfx_labels.append(f"[sfxg{j}]")
 
     filt.append("".join(sfx_labels) + f"amix=inputs={len(sfx_labels)}:duration=longest:normalize=0[sfxmix]")
@@ -710,6 +936,7 @@ def render_episode(episode_id: int) -> dict:
         "regenerated_story_ids": preflight["regenerated"],
         "duration_seconds": total_duration,
         "timings": timings,
+        "visuals": visual_summary,
     }
 
 

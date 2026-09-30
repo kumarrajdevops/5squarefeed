@@ -61,7 +61,9 @@ def test_load_episode_stories_returns_db_rank_order_unmodified(db_session, monke
     monkeypatch.setattr(episode_renderer, "SessionLocal", lambda: db_session)
     db_session.close = lambda: None
 
-    episode = Episode(episode_date=date(2026, 9, 23), status="draft")
+    # Made 2026-09-24 23:30 UTC = 2026-09-25 05:00 IST; covers 2026-09-23.
+    episode = Episode(episode_date=date(2026, 9, 23), status="draft",
+                      created_at=datetime(2026, 9, 24, 23, 30, tzinfo=timezone.utc))
     db_session.add(episode)
     db_session.flush()
 
@@ -78,7 +80,7 @@ def test_load_episode_stories_returns_db_rank_order_unmodified(db_session, monke
 
     # rank 10 -> stories[1], rank 20 -> stories[2], rank 30 -> stories[0]
     assert story_ids == [stories[1].id, stories[2].id, stories[0].id]
-    assert episode_date == "September 23, 2026"
+    assert episode_date == "September 25, 2026"  # made-date in IST, not the coverage day
 
 
 def test_load_episode_stories_ignores_backup_stories(db_session, monkeypatch):

@@ -26,7 +26,7 @@ explainable, nothing that can hallucinate or vary run to run:
 | Verification (soft signal) | Cross-source count + source credibility threshold | No |
 | Ranking | A fixed scoring formula (recency, source credibility, momentum, verification) | No |
 | Script generation | String templates from the raw RSS/article text | No |
-| Voice synthesis | Microsoft's `edge-tts` neural voice (`en-US-GuyNeural`) | **Yes -- the one exception** |
+| Voice synthesis | Microsoft's `edge-tts` neural voice (`en-US-JennyNeural`) | **Yes -- the one exception** |
 | Visual card | Pillow drawing text on a static template | No |
 | Video composition | ffmpeg | No |
 | Automated QA | File/duration checks via `ffprobe` | No |
@@ -257,6 +257,14 @@ after every collection pass:
 curl -X POST http://localhost:8000/api/v1/episodes/select
 ```
 
+**`episode_date` is the coverage day, not the day the episode was
+made** (`target_collection_date()` = IST today - 1). Selection, the
+unique constraint, the dashboard list/API and the YouTube metadata all
+key on it. The moment the episode was actually made is
+`editorial.episodes.created_at` (UTC timestamptz; with
+`video_started_at`/`video_produced_at`/`publish_started_at`/
+`published_at` alongside it). The video intro shows this made-date (IST), bold, just below the tagline.
+
 **Idempotent per `episode_date`** -- `editorial.episodes.episode_date`
 has a `uq_editorial_episodes_episode_date` unique constraint, and this
 endpoint checks for an existing episode before queuing anything: no
@@ -283,8 +291,8 @@ episodes -- there is no override.
 
 There is ONE story-video renderer in the codebase --
 `render_story_enhanced()` (`app/content/episode_renderer.py`) --
-storyboard-driven scenes, real Ken-Burns motion, a light-icon
-watermark, real ASS captions (deterministic keyword emphasis,
+storyboard-driven scenes (photos are held static -- no pan/zoom), a
+light-icon watermark, real ASS captions (deterministic keyword emphasis,
 subordinate style during statistic scenes), a 0.32s dark scene-to-scene
 crossfade, no scene/story outro. Every story-production path below
 renders through it; none duplicates it.
@@ -349,11 +357,19 @@ isn't cached/reused across runs regardless, so there's nothing to gain
 from rendering it early.)
 
 The combined episode video opens with a light-surface branded intro
-card, has a short dark gap + SFX between every story, and closes with
-one silent branded outro card -- one continuous master audio track
-underneath (processed voice per story, a ducked ambient music bed,
-restrained SFX at the intro/story boundaries), not a per-clip narrated
-intro/outro the way the old renderer built one.
+card (the 5squareFeed lockup, loaded by path from
+`app/dashboard/branding/logo/5squarefeed-logo-primary.png`, plus the made-date under the tagline) with a
+spoken, captioned greeting ("Good morning! Welcome to 5squareFeed. Today's
+top tech news."), has a 0.6s left-to-right sweep transition + soft glass-ping SFX at every boundary (intro -> story, story -> story, story -> outro), and closes
+with the same lockup card and a spoken, captioned sign-off ("Thanks for
+watching. See you tomorrow on 5squareFeed.") -- one continuous master audio
+track underneath (processed voice per story plus the two greetings, a ducked
+ambient music bed, a soft glass-ping SFX at each of the three boundaries; the old
+intro/outro chimes were removed -- see `TODO.md` for how to restore them). The
+greetings use the same edge-tts voice, are synthesised once and cached in
+`media/audio/bumpers/`, and the cards have fixed lengths
+(`INTRO_DUR=7.5`, `OUTRO_DUR=6.5` in `episode_renderer.py`, mirrored by
+`INTRO_LEAD_IN_SECONDS` in `app.js`).
 
 **Automated Video QA.** Once an episode is produced, validate it
 against the architecture's QA checklist (story count, AI-only, source
@@ -402,15 +418,15 @@ Every stage is free/local, no API keys required:
   filtered out of any summary before narration.
 - **Voice** -- [edge-tts](https://github.com/rany2/edge-tts) (free
   Microsoft neural TTS, one branded voice for every story). Current
-  voice: `en-US-GuyNeural`, still under review -- shortlisted
-  candidates being compared for the final pick: `en-US-AriaNeural`,
-  `en-US-JennyNeural`, `en-GB-RyanNeural` (see `TODO.md` for the full
-  sample-comparison process across edge-tts's ~46 English voices).
+  voice: `en-US-JennyNeural` (final pick, chosen from the ~46-voice
+  sample comparison described in `TODO.md`). Episodes produced before
+  2026-10-01 keep the earlier `en-US-GuyNeural` narration until they are
+  re-produced.
   Narration is further processed (highpass + gentle EQ lift +
   compression + loudness normalization) before being placed into any
   final mux -- the same one shared filter chain for every caller.
 - **Storyboard/Visual** -- a deterministic scene plan (hero/statistic/
-  comparison/etc.) rendered with Pillow: real Ken-Burns motion,
+  comparison/etc.) rendered with Pillow: static photos,
   light-icon watermark, deterministic keyword-color caption emphasis,
   subordinate caption style during statistic scenes.
   `app/content/scene_renderer.py` + `app/content/storyboard_composer.py`
@@ -424,7 +440,7 @@ Every stage is free/local, no API keys required:
   measured duration (`-t <duration>` from a real ffprobe measurement,
   not just `-shortest` -- see `TODO.md` for why that matters). A
   0.32s dark crossfade joins consecutive scenes within one story; a
-  0.6s dark gap + SFX joins consecutive stories in a full episode.
+  0.6s left-to-right sweep (between the real last/first frames) + SFX joins consecutive stories, the intro and the outro.
   Captions are timed with edge-tts's own real per-sentence timing
   (`SentenceBoundary` events captured during synthesis), not an
   estimate -- see `TODO.md`.

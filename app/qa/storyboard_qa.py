@@ -139,7 +139,7 @@ def run_storyboard_qa_checks(storyboard: dict, scene_dir: Path, video_path: Path
         })
 
     # 5. The brand asset placeholder actually resolves to a real file.
-    logo_path = brand_assets.get_logo_asset_path()
+    logo_path = brand_assets.get_card_mark_path()
     checks.append({
         "check": "brand_logo_present",
         "passed": logo_path.exists(),

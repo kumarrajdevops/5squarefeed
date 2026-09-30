@@ -863,21 +863,22 @@ function renderQAPanelHtml(ep) {
 
 // Matches app/content/episode_renderer.py (the canonical enhanced-
 // Pillow renderer used by both build_episode.py and the production
-// Celery task) -- a 0.6s dark gap + SFX between consecutive *included*
+// Celery task) -- a 0.6s sweep transition + SFX between consecutive *included*
 // story segments, so this offset calculation has to count those gaps
 // too or "jump to here" drifts out of sync later into the episode,
 // same class of bug as the AV-duration mismatch that motivated adding
 // the gaps in the first place.
 const STORY_GAP_SECONDS = 0.6;
 
-// Matches INTRO_DUR + GAP_DUR in episode_renderer.py -- a fixed 1.8s
-// branding card + 0.2s breathing gap before Story 1 begins, always.
+// Matches INTRO_DUR + GAP_DUR in episode_renderer.py -- a fixed 7.5s
+// spoken, captioned greeting card + 0.6s sweep transition before Story 1
+// begins, always.
 // Deliberately a constant, not a per-episode probe: the old
 // intro_duration_seconds field measured a legacy per-episode intro
 // clip file (media/videos/episode_{id}_intro.mp4) that the canonical
 // renderer never writes, so it's stale/absent for any episode produced
 // by it -- the new intro has no per-episode variation to probe.
-const INTRO_LEAD_IN_SECONDS = 2.0;
+const INTRO_LEAD_IN_SECONDS = 8.1;
 
 function computeStartOffset(ep, targetStoryId) {
   let offset = INTRO_LEAD_IN_SECONDS;

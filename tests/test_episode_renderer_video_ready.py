@@ -75,7 +75,7 @@ def test_render_and_mark_story_marks_video_ready_after_a_successful_render(db_se
     story = _make_story_with_content(db_session)
     monkeypatch.setattr(
         episode_renderer, "render_story_enhanced",
-        lambda story_id, tail_pad, work: (Path("clip.mp4"), 12.3, []),
+        lambda story_id, tail_pad, work, position=None: (Path("clip.mp4"), 12.3, []),
     )
 
     clip, dur = episode_renderer._render_and_mark_story(db_session, story.id, Path("/tmp/work"))
@@ -89,7 +89,7 @@ def test_render_and_mark_story_marks_video_ready_after_a_successful_render(db_se
 def test_render_and_mark_story_preserves_failure_state_on_render_failure(db_session, monkeypatch):
     story = _make_story_with_content(db_session, status="voice_ready")
 
-    def fake_render_story_enhanced(story_id, tail_pad, work):
+    def fake_render_story_enhanced(story_id, tail_pad, work, position=None):
         raise RuntimeError("ffmpeg boom")
 
     monkeypatch.setattr(episode_renderer, "render_story_enhanced", fake_render_story_enhanced)
@@ -110,7 +110,7 @@ def test_render_and_mark_story_does_not_roll_back_earlier_successful_stories(db_
     story_ok = _make_story_with_content(db_session, slug="ok")
     story_fail = _make_story_with_content(db_session, slug="fail", status="voice_ready")
 
-    def fake_render_story_enhanced(story_id, tail_pad, work):
+    def fake_render_story_enhanced(story_id, tail_pad, work, position=None):
         if story_id == story_fail.id:
             raise RuntimeError("ffmpeg boom")
         return (Path("clip.mp4"), 10.0, [])

@@ -2586,6 +2586,54 @@ auto-blocking).
       storyboards were valid/reusable -- this was genuinely the first
       full, real render for all 25, not a re-render of already-cached
       work.
+### 2026-09-30 / 10-01 -- Episode 6 OOM fix, static photos, made-date intro
+
+Uncommitted (working tree only; nothing pushed).
+
+- [x] **Episode 6 `video_status=failed` root cause**: ffmpeg OOM-killed
+      (worker cgroup `oom_kill`) during a long story. Looped still-image
+      inputs (`-loop 1`) race ahead of the encoder and buffer frames in
+      proportion to story length (140 s story -> >7 GB on the 7.6 GiB
+      Docker VM). The first hypothesis (Ken-Burns 8x upscale) was
+      disproven by repro at 2x (7.3 GB) and with Ken-Burns off (7.2 GB).
+- [x] Fix: stills are one-frame `-i` inputs held in the filter graph by
+      `still(duration)` (`loop=loop=-1:size=1,setpts=...,trim=...`) for
+      windows, static data frames, the base card and text layers.
+      Peak 7.3 GB -> 1.1 GB; story 260 renders in 122 s and is
+      frame-identical to the old output on a static story. Remaining
+      `-loop` uses (`encode_segments`, `make_card_clip`) were left as-is.
+- [x] Ken-Burns/zoompan removed entirely (`kenburns_filter`, `KB_*`);
+      photos are static. `app/qa/polish_qa.py` no longer has motion
+      checks for photos, only `static_scenes_static`.
+- [x] Branding assets were replaced in place (same filenames, slightly
+      different artwork; primary lockup now reads "25 HEADLINES A DAY").
+      Renderer reads them by path via `brand_assets.get_*_path()`, so
+      they are picked up automatically; the pipeline uses only
+      `icons/5squarefeed-icon-gradient.png`, `icons/5squarefeed-icon-light.png`
+      and `logo/5squarefeed-logo-primary.png`. Five unused originals
+      (`icon-*-master.png`, `icon-light-original.jpg`,
+      `logo-vertical-original.jpg`) were deleted by the user and are left deleted.
+- [x] **Intro date = when the episode was made.** `load_episode_stories`
+      now returns the IST date of `Episode.created_at` (naive values
+      treated as UTC); `render_intro` draws it bottom-centre in navy
+      (previously the intro had no date). The DB column
+      `episode_date` intentionally stays the *coverage* day (selection,
+      unique constraint). Dashboard list/API and YouTube title/description
+      still show the coverage date -- deliberately unchanged
+      (production publishing untouched).
+- [x] Tests: 369 passing (new: still-in-filter-graph, no-zoompan,
+      intro made-date, IST conversion; lookup test now expects the
+      made-date).
+- [x] Re-produced Episode 6 through the normal Produce endpoint after
+      `docker compose restart worker` and clearing `ep6_work/story_*/base.png`:
+      `ready`, 1920x1080, 693.6 s, A/V durations equal, total build
+      1116 s, 0 OOM kills (25 stories rendered in 480 s).
+- [ ] Not yet re-verified on the finished Episode 6 file: intro frame,
+      long-story frames, `/qa` report. Episode 3's mp4 is stale (old
+      lockup, no made-date) and needs a re-render.
+- Note: story 231 shows `qa_failed` in the storyboard caption-cue checks
+      (cue duration/word count); it does not block the episode render.
+
 
 ## Known issues / follow-ups
 
@@ -2731,3 +2779,54 @@ Content-type classification now exists ("part 37" above); per-category
 *ranking* (an actual budget algorithm, not just labels) does not --
 recorded here now so the principle isn't lost before that work starts,
 whenever it does.
+
+### 2026-10-01 -- Spoken intro/outro, Nvidia logo, story 260 edit
+- [x] Intro date removed. Intro and outro are the same lockup card (raised,
+      slightly smaller so the caption box clears the tagline) with a spoken,
+      captioned greeting / sign-off in the standard voice (`BUMPERS`,
+      `ensure_bumper_voice`, `make_bumper_clip`; cached in
+      `media/audio/bumpers/`). `INTRO_DUR=7.5`, `OUTRO_DUR=6.5` (replaces the
+      literal 3.0). Voices join the master mix (music ducks under them).
+      `INTRO_LEAD_IN_SECONDS` -> 7.7 in `app.js`; node test offsets updated
+      (19.196 / 44.348 / 58.796); `polish_qa.py` uses `OUTRO_DUR`.
+      `make_card_clip` (the last `-loop 1` input) is gone.
+- [x] Story 245 (Episode 6 rank 14): NVIDIA entity regex now matches
+      "Nvidia"; visual force re-resolved -> Commons NVIDIA logo.
+- [x] Story 260 (rank 21) was edited in the dashboard (script/summary kept,
+      audio cleared by design) -- fixed by re-Produce, no code change.
+- [x] Tests: 372 passing.
+- Episode 3's mp4 is still the old lockup render; re-render only on request.
+- [x] Follow-up: intro shows the made-date again, bold, just below the tagline
+      (outro stays date-free). Captions raised (`CAPTION_MARGIN_V` 52 -> 110) so the
+      player's hover timeline no longer covers them; two-line cues still clear the
+      source card. Episode 6 re-produced (607.16 s, A/V equal).
+- [x] Sweep transitions replace the dark gap at every boundary: intro->story 1,
+      story->story, last story->outro (`make_transition_clip`, xfade
+      `STORY_TRANSITION="smoothright"`, 0.6 s each, between the real last/first frames;
+      `GAP_DUR` 0.2 -> 0.6, new `OUTRO_GAP`=0.6, +1.0 s total). `INTRO_LEAD_IN_SECONDS`
+      -> 8.1 (`app.js`, node test offsets 8.1 / 19.596 / 44.748 / 59.196), `polish_qa`
+      adds `OUTRO_GAP`, SFX tick at all three boundary types. `"radial"` = rotating wipe.
+- [x] Narration voice is now **`en-US-JennyNeural`** (user's final pick from the
+      voice samples; `VOICE_NAME` in `voice_generator.py`). Episode 6's 25 stories had
+      audio/captions cleared (headline/summary/script untouched, hashes verified) so the
+      next Produce re-voices them; bumper greetings re-synthesised (intro ends 7.04 s of
+      7.5, outro 5.85 s of 6.5). Episodes 1-5 keep Guy narration until re-produced.
+      `media/voice_samples/` is now deletable scratch.
+- [x] **Intro and outro chimes removed** (`sfx_intro.wav`, `sfx_outro.wav`) from the
+      master mix in `render_episode`. Only the per-boundary tick (`sfx_story_gap`) remains.
+      **To restore them later** (all inside `render_episode`, `app/content/episode_renderer.py`,
+      next to `write_wav(... "sfx_story_gap.wav" ...)`):
+        - write the files:
+          `write_wav(work / "sfx_intro.wav", np.concatenate([tone(523.25, 0.22), np.zeros(int(0.05 * SR)), tone(783.99, 0.30)]))`
+          `write_wav(work / "sfx_outro.wav", np.concatenate([tone(783.99, 0.22), np.zeros(int(0.04 * SR)), tone(659.25, 0.22), np.zeros(int(0.04 * SR)), tone(523.25, 0.70, r=0.55)]))`
+        - intro chime: extra `-i sfx_intro.wav` placed first among the SFX inputs with
+          `[{n_voices + 1}:a]adelay=0:all=1[sfx0]` (so gap ticks start at input `n_voices + 2 + j`);
+        - outro chime: extra `-i sfx_outro.wav` after the gap ticks, starting at
+          `round((total_duration - OUTRO_DUR + 0.15) * 1000)` ms via `adelay` -> `[sfxout]`;
+        - add `[sfx0]` / `[sfxout]` to `sfx_labels` so the `amix=inputs=len(sfx_labels)` covers them.
+      (Intro = C5 then G5 rise; outro = G5, E5, C5 falling with a long tail.)
+- [x] Transition sound chosen: **04 Glass ping** (1318.5 Hz + 0.3x 2637 Hz + 0.12x 3951 Hz, exp decay
+      tau 0.16 s, 0.8 s, peak 0.15 in the mix) replaces the 660 Hz tick at all three boundaries
+      (`sfx_story_gap.wav` in `render_episode`; old recipe kept in a comment there).
+      `media/sfx_samples/` is now deletable scratch.
+- [x] Episode 6 re-produced with Jenny + glass ping + no chimes: 641.44 s video / 641.46 s audio, intro and outro voiced, ping measured at the intro boundary, polish_qa unchanged (only the known `static_scenes_static` fails), tests: 375 passing. Episodes 1-5 still have Guy narration and the old chimes until re-produced.

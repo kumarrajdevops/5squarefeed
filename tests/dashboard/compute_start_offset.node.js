@@ -64,18 +64,18 @@ function assertClose(actual, expected, message) {
 }
 
 // Real, independently-verified checkpoints (episode_renderer.py:
-// INTRO_DUR=1.8 + GAP_DUR=0.2 lead-in, STORY_GAP=0.6 between stories).
+// INTRO_DUR=7.5 + GAP_DUR=0.6 lead-in, STORY_GAP=0.6 between stories).
 // Approximate equality throughout -- these are chained floating-point
 // sums, not exact decimals.
-assertClose(computeStartOffset(ep, 122), 2, "first story starts right after the fixed 2.0s intro+gap");
-assertClose(computeStartOffset(ep, 114), 13.496, "second story: 2.0 + 10.896 + 0.6 gap");
-assertClose(computeStartOffset(ep, 123), 38.648, "third story: 13.496 + 24.552 + 0.6 gap");
-assertClose(computeStartOffset(ep, 111), 53.096, "fourth story: 38.648 + 13.848 + 0.6 gap");
+assertClose(computeStartOffset(ep, 122), 8.1, "first story starts right after the fixed 8.1s intro+transition");
+assertClose(computeStartOffset(ep, 114), 19.596, "second story: 8.1 + 10.896 + 0.6 gap");
+assertClose(computeStartOffset(ep, 123), 44.748, "third story: 19.596 + 24.552 + 0.6 gap");
+assertClose(computeStartOffset(ep, 111), 59.196, "fourth story: 44.748 + 13.848 + 0.6 gap");
 
 // A story with no audio_duration_seconds (never reached video_ready)
 // must not occupy time or add a gap on either side of it.
 const afterExcluded = computeStartOffset(ep, 121);
-const expectedAfterExcluded = 53.096 + 24.792 + 0.6; // 111's own duration + one gap, story 999 contributes nothing
+const expectedAfterExcluded = 59.196 + 24.792 + 0.6; // 111's own duration + one gap, story 999 contributes nothing
 assert.ok(
   Math.abs(afterExcluded - expectedAfterExcluded) < 1e-9,
   `story after an excluded one must skip its duration/gap entirely: got ${afterExcluded}, expected ${expectedAfterExcluded}`
