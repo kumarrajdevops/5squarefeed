@@ -2867,3 +2867,9 @@ whenever it does.
       `_support_text`, is cut to 2 lines (~150 chars) with an ellipsis, and applies on the next Produce.
       The box is prefilled with the automatic text; saving it unchanged keeps the story automatic,
       clearing it returns to automatic. Tests: `tests/test_support_text_override.py`.
+- [x] YouTube title/description date (2026-10-01): used `Episode.episode_date` (coverage day = the day
+      before) while the video's intro shows the IST made-date, so Episode 7 uploaded as "September 30"
+      though made on October 1 (Episode 6: "September 29" vs Sept 30). Publishing now uses
+      `app/dates.episode_made_date(created_at)`, same source as the intro. Already-uploaded videos
+      (Ep 6 and 7, dev and prod) keep the old title/description -- the upload-only OAuth scope can't edit
+      them; change in YouTube Studio. Test: `tests/test_multi_environment_publish.py`.

@@ -23,6 +23,15 @@ def today_ist(reference: datetime | None = None) -> date:
     return now.astimezone(IST).date()
 
 
+def episode_made_date(created_at: datetime) -> date:
+    """The IST day an episode was made -- the date its intro card shows and the
+    date YouTube titles/descriptions use. Episode.episode_date is the coverage
+    day (the day before), kept only as the selection/uniqueness key."""
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return today_ist(created_at)
+
+
 def target_collection_date(reference: datetime | None = None) -> date:
     """
     today_ist() - 1 calendar day -- the coverage day any collection or

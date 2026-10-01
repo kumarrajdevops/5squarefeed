@@ -138,3 +138,28 @@ def test_prod_failure_keeps_dev_published(monkeypatch, factory, episode_id):
         assert rows == {"dev": "published", "prod": "failed"}
         assert db.get(Episode, episode_id).publish_status == "published"
 
+
+def test_youtube_title_uses_made_date_not_coverage_date(monkeypatch, factory):
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(publishing, "SessionLocal", factory)
+    with factory() as db:
+        # Coverage day Sep 30; made 05:00 IST on Oct 1 (= 23:30 UTC Sep 30), like Episode 7.
+        ep = Episode(
+            episode_date=date(2026, 9, 30), status="approved", video_status="ready",
+            video_path="media/x.mp4", created_at=datetime(2026, 9, 30, 23, 30, tzinfo=timezone.utc),
+        )
+        db.add(ep)
+        db.commit()
+        episode_id = ep.id
+
+    seen = {}
+
+    def fake_upload(**kwargs):
+        seen.update(kwargs)
+        return {"video_id": "v", "url": "https://youtu.be/v"}
+
+    monkeypatch.setattr(publishing, "upload_video", fake_upload)
+    publish_episode_to_youtube(episode_id, "dev")
+    assert "October 01, 2026" in seen["title"]
+    assert "October 01, 2026" in seen["description"]

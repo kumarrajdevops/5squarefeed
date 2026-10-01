@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import settings
+from app.dates import episode_made_date
 from app.db import SessionLocal
 from app.models import Episode, EpisodePublication, EpisodeStory, NewsItem
 from app.notifications.notifier import EPISODE_PUBLISH_FAILED, notify
@@ -74,7 +75,7 @@ def publish_episode_to_youtube(episode_id: int, environment: str | None = None) 
                 for _episode_story, item in rows
             ]
 
-            metadata = build_video_metadata(episode.episode_date, stories)
+            metadata = build_video_metadata(episode_made_date(episode.created_at), stories)
 
             result = upload_video(
                 video_path=Path(episode.video_path),
