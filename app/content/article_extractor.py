@@ -3,6 +3,8 @@ from typing import NamedTuple
 import requests
 import trafilatura
 
+from app.text_utils import response_text
+
 
 # Full-body fetch + extraction for a story's already-known URL (found
 # via one of the existing RSS/HN sources -- NOT a new discovery
@@ -61,7 +63,7 @@ def fetch_full_article_text(url: str) -> ArticleExtractionResult:
     if "html" not in content_type.lower():
         return ArticleExtractionResult(text=None, status="non_html")
 
-    html = response.text[:MAX_RESPONSE_BYTES]
+    html = response_text(response)[:MAX_RESPONSE_BYTES]
 
     try:
         extracted = trafilatura.extract(html, url=url, favor_precision=True)

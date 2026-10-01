@@ -1,6 +1,8 @@
 import re
 from html import unescape
 
+from app.text_utils import clean_text, repair_mojibake
+
 
 # How many summary sentences to keep -- this is a short single-story
 # clip, not a full article read-through.
@@ -28,6 +30,7 @@ def _strip_html(text: str) -> str:
     # RSS summaries are frequently HTML fragments (<p>, <a>, entities).
     # Strip tags and decode entities so the result reads as plain
     # narration text.
+    text = repair_mojibake(text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -122,7 +125,7 @@ def generate_script(title: str, raw_summary: str | None, raw_content: str | None
     already produced.
     """
 
-    headline = title.strip()
+    headline = clean_text(title).strip()
     source_text = raw_content if raw_content and raw_content.strip() else raw_summary
     summary = build_summary(source_text)
 

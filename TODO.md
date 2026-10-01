@@ -2852,3 +2852,12 @@ whenever it does.
       invalidate. Tests in `tests/test_episode_renderer_video_ready.py`. Needs `docker compose restart
       worker`; verify with a no-edit re-Produce (expect "25 reused"). Episode 7's current run uses the old
       code, so the first Produce after the worker restart regenerates once more; the one after reuses.
+- [x] Headline/caption/narration text bugs (2026-10-01): (a) some feeds send HTML-escaped titles
+      (`Anthropic&#8217;s`) that were stored and narrated verbatim; (b) article pages with no charset header
+      were decoded as ISO-8859-1 by `requests` (`doesn’t` -> `doesnâ€™t`). New `app/text_utils.py`
+      (`clean_text`, `repair_mojibake`, `response_text`) is used at ingestion (titles), in
+      `generate_script` (headline + summaries) and in the two page fetchers. Wording is never changed.
+      One-off cleanup fixed 4 existing `raw.news_items` titles + 1 mojibake `raw_content` (id 128).
+      NOT touched: story 111 (Episode 3) still has `&#8217;` in `story_content.headline/script_text` and
+      its narration; fix = unescape the two fields, clear audio fields, re-Produce Episode 3.
+      Tests: `tests/test_text_utils.py`.

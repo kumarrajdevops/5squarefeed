@@ -8,6 +8,7 @@ from app.dates import coverage_window  # Single authoritative date/window module
 from app.models import NewsItem  # raw.news_items model
 from app.sources.article_fetcher import fetch_article_summary  # Fallback summary for empty RSS excerpts
 from app.sources.registry import NEWS_SOURCES  # Configured news sources
+from app.text_utils import clean_text
 
 
 # Many sites (VentureBeat's Vercel bot-challenge is a known example) block
@@ -194,7 +195,7 @@ def ingest_news(db, target_date) -> dict:
                     summary = fetch_article_summary(url)
 
                 item = NewsItem(
-                    title=title.strip(),
+                    title=clean_text(title).strip(),
                     canonical_url=canonical_url,
                     source_name=source["name"],
                     source_type=source["source_type"],

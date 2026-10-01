@@ -4,6 +4,8 @@ from html.parser import HTMLParser
 
 import requests
 
+from app.text_utils import response_text
+
 
 # Hacker News link-posts have no article content available from HN's own
 # API (Algolia search only returns submission metadata -- points,
@@ -96,7 +98,7 @@ def fetch_article_summary(url: str) -> str | None:
 
     parser = _MetaDescriptionParser()
     try:
-        parser.feed(response.text[:MAX_RESPONSE_BYTES])
+        parser.feed(response_text(response)[:MAX_RESPONSE_BYTES])
     except Exception:
         return None
 
