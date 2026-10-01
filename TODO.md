@@ -2861,3 +2861,9 @@ whenever it does.
       NOT touched: story 111 (Episode 3) still has `&#8217;` in `story_content.headline/script_text` and
       its narration; fix = unescape the two fields, clear audio fields, re-Produce Episode 3.
       Tests: `tests/test_text_utils.py`.
+- [x] Editable source/quote line (2026-10-01): the edit panel has a "Source / quote line" textarea under the
+      script. Stored in new `editorial.story_content.support_text` (migration `a4c8e1b7d052`); NULL =
+      automatic (`scene_renderer.default_support_text`). When set it wins over every scene type in
+      `_support_text`, is cut to 2 lines (~150 chars) with an ellipsis, and applies on the next Produce.
+      The box is prefilled with the automatic text; saving it unchanged keeps the story automatic,
+      clearing it returns to automatic. Tests: `tests/test_support_text_override.py`.

@@ -343,6 +343,9 @@ class StoryContent(Base):
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Human override of the source/quote line under the video's visual window;
+    # NULL = automatic (see scene_renderer._support_text).
+    support_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     audio_duration_seconds: Mapped[float | None] = mapped_column(nullable=True)

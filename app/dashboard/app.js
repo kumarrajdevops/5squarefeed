@@ -1233,6 +1233,7 @@ function openEditPanel(story) {
   document.getElementById("edit-headline").value = story.headline || story.title || "";
   document.getElementById("edit-summary").value = story.summary || "";
   document.getElementById("edit-script").value = story.script_text || "";
+  loadSupportText(story);
   document.getElementById("edit-status").textContent = story.content_status
     ? `content status: ${story.content_status}`
     : "no content generated yet";
@@ -1246,6 +1247,29 @@ function openEditPanel(story) {
   overlay.hidden = false;
   overlay.scrollTop = 0;
   document.body.style.overflow = "hidden";
+}
+
+let supportInitial = { value: "", default: "" };
+
+async function loadSupportText(story) {
+  const box = document.getElementById("edit-support");
+  const storyId = story.story_id;
+  supportInitial = { value: null, default: "" };
+  box.value = story.support_text || "";
+  box.disabled = true;
+  try {
+    const content = await apiGet(`/stories/${storyId}/content`);
+    if (editingStoryId !== storyId) return;
+    const def = content.support_text_default || "";
+    supportInitial = { value: content.support_text || def, default: def };
+    box.value = supportInitial.value;
+    box.placeholder = "Automatic: only the source name shows";
+    box.disabled = false;
+  } catch (err) {
+    // No content yet (404) -- nothing to override until the story has a script.
+    supportInitial = { value: "", default: "" };
+    box.placeholder = "Available once this story has content";
+  }
 }
 
 function closeEditPanel() {
@@ -1262,6 +1286,11 @@ document.getElementById("edit-save").addEventListener("click", async () => {
     summary: document.getElementById("edit-summary").value,
     script_text: document.getElementById("edit-script").value,
   };
+  const supportBox = document.getElementById("edit-support");
+  if (supportInitial.value !== null && supportBox.value !== supportInitial.value) {
+    // Unchanged-from-automatic text is sent as "" so the story stays automatic.
+    body.support_text = supportBox.value.trim() === supportInitial.default ? "" : supportBox.value;
+  }
 
   try {
     await apiPatch(`/stories/${editingStoryId}/content`, body);

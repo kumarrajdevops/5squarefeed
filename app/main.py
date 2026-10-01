@@ -95,10 +95,28 @@ async def no_store_api_responses(request, call_next):
     return response
 
 
+def _default_support_text(story_id: int, content) -> str:
+    """The automatic source/quote line the video would show without an override."""
+    try:
+        from app.content.scene_renderer import default_support_text
+        from app.content.support_facts import load_support_info
+
+        info = load_support_info(story_id)
+        if not info:
+            return ""
+        with SessionLocal() as db:
+            item = db.get(NewsItem, story_id)
+            title = item.title if item else ""
+        return default_support_text(info, title or "", content.headline or "")
+    except Exception:
+        return ""
+
+
 class StoryContentUpdate(BaseModel):
     headline: str | None = None
     summary: str | None = None
     script_text: str | None = None
+    support_text: str | None = None  # "" clears the override (back to automatic)
 
 
 class ReorderRequest(BaseModel):
@@ -1172,6 +1190,7 @@ def _serialize_episode(db, episode: Episode) -> dict:
             "headline": content.headline if content else None,
             "summary": content.summary if content else None,
             "script_text": content.script_text if content else None,
+            "support_text": content.support_text if content else None,
             "audio_duration_seconds": content.audio_duration_seconds if content else None,
             # video_path is a fixed per-story URL that gets overwritten
             # in place on every regeneration (edit -> reset -> re-Produce)
@@ -1328,6 +1347,8 @@ def get_story_content(story_id: int):
             "headline": content.headline,
             "summary": content.summary,
             "script_text": content.script_text,
+            "support_text": content.support_text,
+            "support_text_default": _default_support_text(story_id, content),
             "audio_url": media_url(content.audio_path),
             "audio_duration_seconds": content.audio_duration_seconds,
             "image_url": media_url(content.image_path),
@@ -1380,6 +1401,8 @@ def update_story_content(story_id: int, body: StoryContentUpdate):
             content.summary = body.summary
         if body.script_text is not None:
             content.script_text = body.script_text
+        if body.support_text is not None:
+            content.support_text = body.support_text.strip() or None
 
         content.status = "script_ready"
         content.audio_path = None

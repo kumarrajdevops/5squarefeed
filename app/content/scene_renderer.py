@@ -417,6 +417,9 @@ def _support_text(scene: dict, storyboard: dict, headline: str) -> tuple[str, bo
     article's own title (quoted), the publication date. Each candidate must
     fit in two lines untruncated and must not repeat the headline; "" means
     only the source attribution shows."""
+    override = ((storyboard.get("_support") or {}).get("override") or "").strip()
+    if override:
+        return override, False
     scene_type = scene.get("scene_type")
     if scene_type == "statistic" and scene.get("stat"):
         parts = [p for p in (scene.get("tier"), scene.get("date"), scene.get("source")) if p]
@@ -432,19 +435,23 @@ def _support_text(scene: dict, storyboard: dict, headline: str) -> tuple[str, bo
         if parts:
             return "   |   ".join(parts), False
 
+    return default_support_text(storyboard.get("_support") or {}, _story_title(storyboard), headline), False
+
+
+def default_support_text(info: dict, title: str, headline: str) -> str:
+    """The automatic source/quote line: first stored candidate that fits two
+    lines untruncated and doesn't repeat the headline; "" if none."""
     from app.content.support_facts import _overlap
 
-    info = storyboard.get("_support") or {}
-    title = _story_title(storyboard)
-    candidates = [(info.get("article_fact"), False), (info.get("summary"), False), (title, False), (info.get("published"), False)]
+    candidates = [info.get("article_fact"), info.get("summary"), title, info.get("published")]
     head = headline.rstrip("…")
-    for text, quoted in candidates:
+    for text in candidates:
         text = html.unescape(text or "").strip()
         if not text or _overlap(text, head) > 0.6:
             continue
-        if _fits_support(f"“{text}”" if quoted else text):
-            return text, quoted
-    return "", False
+        if _fits_support(text):
+            return text
+    return ""
 
 
 # ---------------------------------------------------------------------

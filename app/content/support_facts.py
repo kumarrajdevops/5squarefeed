@@ -134,7 +134,7 @@ def load_support_info(story_id: int) -> dict | None:
             return None
         content = db.query(StoryContent).filter_by(story_id=story_id).first()
         narration = (content.script_text if content else "") or ""
-        return build_support_info(
+        info = build_support_info(
             html.unescape(item.title or ""),
             item.raw_summary or "",
             item.raw_content or "",
@@ -142,3 +142,5 @@ def load_support_info(story_id: int) -> dict | None:
             item.published_at,
             item.source_name or "",
         )
+        info["override"] = ((content.support_text if content else "") or "").strip()
+        return info
