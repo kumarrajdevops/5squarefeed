@@ -67,6 +67,49 @@ def test_mark_story_video_ready_sets_status_and_relative_video_path(db_session):
     assert content.error_message is None
 
 
+def test_mark_story_video_ready_keeps_storyboard_reusable(db_session, tmp_path, monkeypatch):
+    """The status write bumps StoryContent.updated_at; that must not make the
+    already-valid storyboard look stale (full regeneration on every Produce)."""
+    import os
+    import time
+
+    from app.content import storyboard_service
+
+    monkeypatch.setattr(storyboard_service, "MEDIA_ROOT", tmp_path)
+    story = _make_story_with_content(db_session)
+    path = tmp_path / "storyboard" / str(story.id) / "storyboard.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+    episode_renderer._mark_story_video_ready(db_session, story.id)
+
+    content = db_session.query(StoryContent).filter_by(story_id=story.id).first()
+    assert storyboard_service._storyboard_is_valid(story.id, content)
+
+
+def test_edit_after_storyboard_still_invalidates_it(db_session, tmp_path, monkeypatch):
+    import os
+    import time
+
+    from app.content import storyboard_service
+
+    monkeypatch.setattr(storyboard_service, "MEDIA_ROOT", tmp_path)
+    story = _make_story_with_content(db_session)
+    path = tmp_path / "storyboard" / str(story.id) / "storyboard.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+    content = db_session.query(StoryContent).filter_by(story_id=story.id).first()
+    content.script_text = "Edited by a human."
+    db_session.commit()
+
+    assert not storyboard_service._storyboard_is_valid(story.id, content)
+
+
 # ---------------------------------------------------------------------
 # _render_and_mark_story -- render, THEN mark; never the reverse.
 # ---------------------------------------------------------------------

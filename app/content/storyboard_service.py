@@ -121,6 +121,17 @@ def _storyboard_is_valid(story_id: int, content: StoryContent) -> bool:
     return mtime >= updated_at
 
 
+def mark_storyboard_current(story_id: int) -> None:
+    """Re-stamp the storyboard's mtime after a status-only write to the
+    story's row (e.g. "video_ready"). That write bumps StoryContent.updated_at
+    via onupdate, which would otherwise make every just-rendered story look
+    edited and force a full storyboard regeneration on the next Produce.
+    Only call it when the storyboard was already valid before the write."""
+    storyboard_path = MEDIA_ROOT / "storyboard" / str(story_id) / "storyboard.json"
+    if storyboard_path.exists():
+        storyboard_path.touch()
+
+
 def ensure_storyboard(db, story_id: int) -> dict:
     """
     Automatic prerequisite for episode production (called as a plain

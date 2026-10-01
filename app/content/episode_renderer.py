@@ -62,7 +62,7 @@ from PIL import Image, ImageDraw, ImageFont
 from app.content import brand_assets, support_facts, visual_assets
 from app.content import scene_renderer as sr
 from app.content import storyboard_composer as sc
-from app.content.storyboard_service import ensure_storyboard
+from app.content.storyboard_service import ensure_storyboard, mark_storyboard_current
 from app.dates import today_ist
 from app.content.video_composer import get_audio_duration_seconds
 from app.content.voice_generator import VOICE_NAME, synthesize_voice
@@ -176,6 +176,9 @@ def _mark_story_video_ready(db, story_id: int) -> None:
     content.status = "video_ready"
     content.error_message = None
     db.commit()
+    # The status write above bumped updated_at; keep the (still valid)
+    # storyboard from looking stale on the next Produce.
+    mark_storyboard_current(story_id)
 
 
 def _render_and_mark_story(db, story_id: int, work: Path, position: tuple[int, int] | None = None) -> tuple[Path, float]:

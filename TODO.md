@@ -2845,3 +2845,10 @@ whenever it does.
       (host machine; `YOUTUBE_ENVIRONMENT=prod` for prod), paste the token into `.env`, then
       `docker compose up -d --force-recreate api worker`. Uploads from an unaudited API project stay
       private regardless of the requested privacy.
+- [x] Storyboard reuse fix (2026-10-01): `_mark_story_video_ready` bumped `StoryContent.updated_at`
+      after each render, so every previously rendered story looked edited and Produce regenerated all
+      25 storyboards (~17 min, "0 reused"). It now re-stamps `storyboard.json`
+      (`storyboard_service.mark_storyboard_current`) after the status write; real edits still
+      invalidate. Tests in `tests/test_episode_renderer_video_ready.py`. Needs `docker compose restart
+      worker`; verify with a no-edit re-Produce (expect "25 reused"). Episode 7's current run uses the old
+      code, so the first Produce after the worker restart regenerates once more; the one after reuses.
