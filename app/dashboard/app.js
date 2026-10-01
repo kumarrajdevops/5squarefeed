@@ -38,6 +38,14 @@ function formatDateTime(iso) {
   });
 }
 
+// IST calendar day an episode was made -- the same date the video intro shows.
+function madeDateIst(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
 function renderEditMetaHtml(story) {
   const rows = [
     ["Source", story.source_name],
@@ -626,6 +634,8 @@ async function renderEpisodeList() {
     <tr class="row-link" data-id="${ep.episode_id}">
       <td>#${ep.episode_id}</td>
       <td>${ep.episode_date}</td>
+      <td>${madeDateIst(ep.created_at)}</td>
+      <td>${ep.published_at ? formatDateTime(ep.published_at) : "&mdash;"}</td>
       <td><span class="pill ${ep.status}">${ep.status}</span></td>
       <td><span class="pill ${ep.video_status}">${ep.video_status}</span></td>
       <td><span class="pill ${ep.qa_status}">${ep.qa_status}</span></td>
@@ -639,7 +649,7 @@ async function renderEpisodeList() {
     ${collectPanelHtml}
     <table class="episode-list">
       <thead>
-        <tr><th>ID</th><th>Episode date</th><th>Status</th><th>Video</th><th>QA</th><th>Publish</th><th>Primary / Backup</th></tr>
+        <tr><th>ID</th><th title="Day of news the episode covers">News from</th><th title="IST day the episode was made (shown in the video intro)">Made on</th><th>Published</th><th>Status</th><th>Video</th><th>QA</th><th>Publish</th><th>Primary / Backup</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -762,7 +772,7 @@ function renderStudioLayout(ep) {
       <div>
         <h1>Episode #${ep.episode_id}</h1>
         <div class="meta">
-          ${ep.episode_date}
+          News from ${ep.episode_date} &middot; made ${madeDateIst(ep.created_at)}
           &nbsp;<span class="pill ${ep.status}">${ep.status}</span>
           <span class="pill ${ep.video_status}">${ep.video_status}</span>
           <span class="pill ${ep.qa_status}">qa: ${ep.qa_status}</span>
@@ -1232,19 +1242,19 @@ function openEditPanel(story) {
     ? `<video controls src="${cacheBust(story.video_url, story.content_updated_at)}"></video>`
     : "";
 
-  document.getElementById("edit-overlay").hidden = false;
+  const overlay = document.getElementById("edit-overlay");
+  overlay.hidden = false;
+  overlay.scrollTop = 0;
+  document.body.style.overflow = "hidden";
 }
 
 function closeEditPanel() {
   document.getElementById("edit-overlay").hidden = true;
+  document.body.style.overflow = "";
   editingStoryId = null;
 }
 
 document.getElementById("edit-close").addEventListener("click", closeEditPanel);
-
-document.getElementById("edit-overlay").addEventListener("click", (e) => {
-  if (e.target.id === "edit-overlay") closeEditPanel();
-});
 
 document.getElementById("edit-save").addEventListener("click", async () => {
   const body = {

@@ -27,32 +27,34 @@
 <div id="edit-overlay" class="overlay" hidden>
   <div class="edit-panel">
     <div class="edit-panel-header">
+      <button id="edit-close" class="btn btn-ghost" type="button">&larr; Back to episode</button>
       <h2 id="edit-title">Edit story</h2>
+      <div class="edit-panel-footer-actions">
+        <span id="edit-status" class="edit-status"></span>
+        <button id="edit-save" class="btn btn-primary" type="button">Save</button>
+      </div>
     </div>
     <div class="edit-panel-body">
-      <div class="edit-source-block">
-        <span class="edit-source-label">Source article</span>
-        <div id="edit-source"></div>
-        <dl id="edit-meta" class="edit-meta"></dl>
+      <div class="edit-main">
+        <label>Headline
+          <input id="edit-headline" type="text">
+        </label>
+        <label>Summary
+          <textarea id="edit-summary" rows="4"></textarea>
+        </label>
+        <label>Script text (spoken narration)
+          <textarea id="edit-script" rows="14"></textarea>
+        </label>
+        <p class="edit-note">Saving resets this story's audio/visual/video — re-run <code>Produce</code> on the episode to regenerate them from the edited script.</p>
       </div>
-      <label>Headline
-        <input id="edit-headline" type="text">
-      </label>
-      <label>Summary
-        <textarea id="edit-summary" rows="3"></textarea>
-      </label>
-      <label>Script text (spoken narration)
-        <textarea id="edit-script" rows="5"></textarea>
-      </label>
-      <p class="edit-note">Saving resets this story's audio/visual/video — re-run <code>Produce</code> on the episode to regenerate them from the edited script.</p>
-      <div id="edit-preview"></div>
-    </div>
-    <div class="edit-panel-footer">
-      <span id="edit-status" class="edit-status"></span>
-      <div class="edit-panel-footer-actions">
-        <button id="edit-save" class="btn btn-primary" type="button">Save</button>
-        <button id="edit-close" class="btn btn-ghost" type="button">Close</button>
-      </div>
+      <aside class="edit-side">
+        <div class="edit-source-block">
+          <span class="edit-source-label">Source article</span>
+          <div id="edit-source"></div>
+          <dl id="edit-meta" class="edit-meta"></dl>
+        </div>
+        <div id="edit-preview"></div>
+      </aside>
     </div>
   </div>
 </div>

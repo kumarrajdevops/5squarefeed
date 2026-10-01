@@ -914,6 +914,7 @@ def list_episodes():
                 "video_status": episode.video_status,
                 "qa_status": episode.qa_status,
                 "publish_status": episode.publish_status,
+                "published_at": episode.published_at,
                 "created_at": episode.created_at,
                 "primary_count": primary_count,
                 "backup_count": backup_count,
