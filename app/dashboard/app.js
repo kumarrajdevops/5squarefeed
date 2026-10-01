@@ -729,14 +729,31 @@ function renderPipelineChartHtml(pipeline) {
 
 function renderStudioLayout(ep) {
   const producing = ep.video_status === "producing";
-  const publishing = ep.publish_status === "publishing";
-  const published = ep.publish_status === "published";
   const qaStale = qaIsStale(ep);
-
-  let publishLabel = "Publish to YouTube";
-  if (publishing) publishLabel = "Publishing… 0:00";
-  else if (published) publishLabel = "Published ✓";
-  else if (ep.publish_status === "failed") publishLabel = "Retry Publish";
+  const pubs = ep.publications || {};
+  const publishButtonsHtml = PUBLISH_ENVS.map((env) => {
+    const pub = pubs[env] || { status: "not_published", configured: false };
+    let label = `Publish to ${env.toUpperCase()}`;
+    if (pub.status === "publishing") label = `Publishing ${env.toUpperCase()}… 0:00`;
+    else if (pub.status === "published") label = `Published ${env.toUpperCase()} ✓`;
+    else if (pub.status === "failed") label = `Retry ${env.toUpperCase()}`;
+    const blocked = pub.status === "publishing" || pub.status === "published" || !pub.configured;
+    const title = pub.configured
+      ? `Upload this episode's video to the ${env.toUpperCase()} YouTube channel`
+      : `${env.toUpperCase()} YouTube credentials are not set in .env yet`;
+    return `<button class="btn btn-publish youtube-env-${env}" id="btn-publish-${env}" data-env="${env}" type="button" title="${title}" ${(producing || blocked) ? "disabled" : ""}>${label}</button>`;
+  }).join("");
+  const publishLinksHtml = PUBLISH_ENVS.map((env) => {
+    const pub = pubs[env];
+    if (!pub) return "";
+    if (pub.status === "published" && pub.youtube_url) {
+      return `<p class="meta">Published (${env}): <a href="${pub.youtube_url}" target="_blank" rel="noopener">${pub.youtube_url}</a></p>`;
+    }
+    if (pub.status === "failed" && pub.error) {
+      return `<p class="meta publish-error">Publish to ${env} failed: ${escapeHtml(pub.error)}</p>`;
+    }
+    return "";
+  }).join("");
 
   app.innerHTML = `
     <div><a href="/dashboard/">&larr; All episodes</a></div>
@@ -751,20 +768,14 @@ function renderStudioLayout(ep) {
           <span class="pill ${ep.qa_status}">qa: ${ep.qa_status}</span>
           <span class="pill ${ep.publish_status}">${ep.publish_status.replace("_", " ")}</span>
         </div>
-        ${ep.youtube_url
-          ? `<p class="meta">Published: <a href="${ep.youtube_url}" target="_blank" rel="noopener">${ep.youtube_url}</a></p>`
-          : ""}
-        ${ep.publish_status === "failed" && ep.publish_error
-          ? `<p class="meta publish-error">Publish failed: ${escapeHtml(ep.publish_error)}</p>`
-          : ""}
+        ${publishLinksHtml}
       </div>
       <div class="studio-actions">
         <button class="btn" id="btn-produce" type="button" ${producing ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
         <button class="btn${qaStale ? " btn-warn" : ""}" id="btn-qa" type="button" ${producing ? "disabled" : ""}>${qaStale ? "Run QA ⚠ (stale)" : "Run QA"}</button>
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
-        <button class="btn" id="btn-publish" type="button" ${(producing || publishing || published) ? "disabled" : ""}>${publishLabel}</button>
-        <span class="pill youtube-env youtube-env-${ep.youtube_environment}" title="A Publish click uploads to the ${ep.youtube_environment.toUpperCase()} YouTube channel/credentials (app/config.py's YOUTUBE_ENVIRONMENT)">${ep.youtube_environment} channel</span>
+        ${publishButtonsHtml}
       </div>
     </div>
 
@@ -1099,20 +1110,22 @@ function startQaPolling(ep, requestStartIso) {
 // while (resumable upload, real network transfer) -- same live-timer
 // polling pattern as Produce, no safety timeout (an upload legitimately
 // can run several minutes for a 5-8 minute video on a slow connection).
-function startPublishPolling(ep, startTime) {
-  const publishBtn = document.getElementById("btn-publish");
+const PUBLISH_ENVS = ["dev", "prod"];
+
+function startPublishPolling(ep, env, startTime) {
+  const publishBtn = document.getElementById(`btn-publish-${env}`);
   if (!publishBtn) return;
 
   publishBtn.disabled = true;
 
-  const tick = () => { publishBtn.textContent = `Publishing… ${formatElapsed(Date.now() - startTime)}`; };
+  const tick = () => { publishBtn.textContent = `Publishing ${env.toUpperCase()}… ${formatElapsed(Date.now() - startTime)}`; };
   tick();
   const timerInterval = setInterval(tick, 1000);
 
   const pollInterval = setInterval(async () => {
     try {
       const fresh = await apiGet(`/episodes/${ep.episode_id}`);
-      if (fresh.publish_status !== "publishing") {
+      if (!fresh.publications || fresh.publications[env].status !== "publishing") {
         clearInterval(timerInterval);
         clearInterval(pollInterval);
         await renderEpisodeStudio(ep.episode_id);
@@ -1156,18 +1169,21 @@ function wireHeaderButtons(ep) {
     startProducePolling(ep, ep.video_started_at ? new Date(ep.video_started_at).getTime() : Date.now());
   }
 
-  if (ep.publish_status === "publishing") {
-    startPublishPolling(ep, ep.publish_started_at ? new Date(ep.publish_started_at).getTime() : Date.now());
-  }
-
-  document.getElementById("btn-publish").addEventListener("click", async () => {
-    const startTime = Date.now();
-    try {
-      await apiPost(`/episodes/${ep.episode_id}/publish`);
-      startPublishPolling(ep, startTime);
-    } catch (err) {
-      alert("Failed to queue publish: " + err.message);
+  PUBLISH_ENVS.forEach((env) => {
+    const pub = (ep.publications || {})[env];
+    if (pub && pub.status === "publishing") {
+      startPublishPolling(ep, env, pub.started_at ? new Date(pub.started_at).getTime() : Date.now());
     }
+
+    document.getElementById(`btn-publish-${env}`).addEventListener("click", async () => {
+      const startTime = Date.now();
+      try {
+        await apiPost(`/episodes/${ep.episode_id}/publish?environment=${env}`);
+        startPublishPolling(ep, env, startTime);
+      } catch (err) {
+        alert("Failed to queue publish: " + err.message);
+      }
+    });
   });
 
   document.getElementById("btn-approve").addEventListener("click", async () => {

@@ -212,6 +212,14 @@ Don't re-diagnose from scratch.
   script text) and Produce again. The only SFX in the mix is the per-boundary ping
   (`sfx_story_gap`); the removed intro/outro chimes are documented in `TODO.md`.
 
+- YouTube OAuth consent screen must be set to **"In production"** (Publish app) in
+  each Google Cloud project, dev and prod. In "Testing" status the refresh token
+  expires after 7 days and publish fails with `invalid_grant: Bad Request`; fix is to
+  publish the app, re-run `python -m app.scripts.youtube_oauth_setup` on the host
+  (`YOUTUBE_ENVIRONMENT=dev|prod`), update `.env`, then
+  `docker compose up -d --force-recreate api worker`. Dev and prod publish
+  independently from the same video (`editorial.episode_publications`).
+
 ## Verification checklist after touching the produce/QA pipeline
 
 Use the `verify-episode` skill, or manually:

@@ -12,7 +12,8 @@ from sqlalchemy import select, text
 from app.config import settings
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
-from app.models import CollectionRun, Episode, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.models import CollectionRun, Episode, EpisodePublication, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
 from app.tasks.content import produce_story_video_task
@@ -787,7 +788,7 @@ def reprocess_episode_endpoint(episode_id: int):
 
 
 @app.post("/api/v1/episodes/{episode_id}/publish")
-def trigger_episode_publish(episode_id: int):
+def trigger_episode_publish(episode_id: int, environment: str | None = None):
     """
     Publish an approved, produced episode to YouTube (see
     app/tasks/publishing.py). Manual trigger only, matching Produce/
@@ -795,11 +796,21 @@ def trigger_episode_publish(episode_id: int):
     a real, externally-visible side effect, so it deliberately never
     auto-cascades from Approve.
 
-    Sets publish_status = "publishing" here, synchronously, same
-    race-avoidance reason as trigger_episode_production() above: a
+    `environment` ("dev"/"prod", default YOUTUBE_ENVIRONMENT) picks the
+    destination channel. The same produced video can be published to
+    each environment once -- e.g. dev now, prod later once its
+    credentials exist -- with per-environment state in
+    EpisodePublication rows (rolled up into Episode.publish_*).
+
+    Sets the publication's status = "publishing" here, synchronously,
+    same race-avoidance reason as trigger_episode_production() above: a
     poller can't otherwise distinguish "not started yet" from
     "already finished".
     """
+    environment = environment or settings.youtube_environment
+    if environment not in ENVIRONMENTS:
+        raise HTTPException(status_code=400, detail="environment must be 'dev' or 'prod'.")
+
     with SessionLocal() as db:
         episode = db.get(Episode, episode_id)
 
@@ -818,12 +829,51 @@ def trigger_episode_publish(episode_id: int):
                 detail="Episode has no produced video yet -- run Produce first.",
             )
 
-        episode.publish_status = "publishing"
-        episode.publish_started_at = datetime.now(timezone.utc)
+        publication = (
+            db.query(EpisodePublication)
+            .filter(EpisodePublication.episode_id == episode_id, EpisodePublication.environment == environment)
+            .one_or_none()
+        )
+        if publication is not None and publication.status in ("published", "publishing"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Episode is already {publication.status} to {environment}.",
+            )
+        now = datetime.now(timezone.utc)
+        if publication is None:
+            publication = EpisodePublication(episode_id=episode_id, environment=environment)
+            db.add(publication)
+        publication.status = "publishing"
+        publication.started_at = now
+        publication.error = None
+        db.flush()
+        episode.publish_started_at = now
+        refresh_publish_summary(db, episode)
         db.commit()
 
-    task = publish_episode_to_youtube.delay(episode_id)
+    task = publish_episode_to_youtube.delay(episode_id, environment)
     return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
+def _serialize_publications(db, episode: Episode) -> dict:
+    """Per-environment publish state for the dashboard's dev/prod
+    Publish buttons (configured = credentials present in .env)."""
+    rows = {
+        r.environment: r
+        for r in db.query(EpisodePublication).filter(EpisodePublication.episode_id == episode.id).all()
+    }
+    out = {}
+    for env in ENVIRONMENTS:
+        r = rows.get(env)
+        out[env] = {
+            "configured": settings.youtube_configured_for(env),
+            "status": r.status if r else "not_published",
+            "started_at": r.started_at if r else None,
+            "published_at": r.published_at if r else None,
+            "youtube_url": r.youtube_url if r else None,
+            "error": r.error if r else None,
+        }
+    return out
 
 
 @app.get("/api/v1/episodes")
@@ -1163,6 +1213,7 @@ def _serialize_episode(db, episode: Episode) -> dict:
         # click would actually use, before it's clicked. See
         # app/config.py's youtube_environment (dev vs prod).
         "youtube_environment": settings.youtube_environment,
+        "publications": _serialize_publications(db, episode),
         "pipeline": _compute_pipeline_stages(db, episode, len(primary), len(backup)),
         "primary": primary,
         "backup": backup,

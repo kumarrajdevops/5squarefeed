@@ -51,25 +51,33 @@ class Settings(BaseSettings):
     youtube_prod_client_secret: str | None = None
     youtube_prod_refresh_token: str | None = None
 
+    def youtube_credentials(self, environment: str | None = None) -> tuple[str | None, str | None, str | None]:
+        """(client_id, client_secret, refresh_token) for one environment
+        (default: youtube_environment). Publishing names the environment
+        explicitly so one produced video can go to dev and prod."""
+        env = environment or self.youtube_environment
+        if env == "prod":
+            return (self.youtube_prod_client_id, self.youtube_prod_client_secret, self.youtube_prod_refresh_token)
+        return (self.youtube_dev_client_id, self.youtube_dev_client_secret, self.youtube_dev_refresh_token)
+
+    def youtube_configured_for(self, environment: str | None = None) -> bool:
+        return all(self.youtube_credentials(environment))
+
     @property
     def youtube_client_id(self) -> str | None:
-        return self.youtube_prod_client_id if self.youtube_environment == "prod" else self.youtube_dev_client_id
+        return self.youtube_credentials()[0]
 
     @property
     def youtube_client_secret(self) -> str | None:
-        return self.youtube_prod_client_secret if self.youtube_environment == "prod" else self.youtube_dev_client_secret
+        return self.youtube_credentials()[1]
 
     @property
     def youtube_refresh_token(self) -> str | None:
-        return self.youtube_prod_refresh_token if self.youtube_environment == "prod" else self.youtube_dev_refresh_token
+        return self.youtube_credentials()[2]
 
     @property
     def youtube_configured(self) -> bool:
-        return bool(
-            self.youtube_client_id
-            and self.youtube_client_secret
-            and self.youtube_refresh_token
-        )
+        return self.youtube_configured_for()
 
     # Slack Incoming Webhook for the Notification Worker (see
     # app/notifications/notifier.py). None until a real webhook exists

@@ -583,11 +583,20 @@ tracked per Google Cloud project, not per channel -- sharing prod's
 credentials for dev testing risks burning the day's quota on test
 uploads and blocking a real publish. A separate test channel also
 means dev's `private`-visibility test uploads never clutter the real
-channel's video library. `YOUTUBE_ENVIRONMENT` (`dev` or `prod`, in
-`.env`) picks which credential pair is actually live -- both can be
-configured at once, so switching modes never means editing secrets.
-The dashboard shows which one is active as a pill next to the Publish
-button (red/bold for `prod`, impossible to miss).
+channel's video library. Both credential pairs can be configured at
+once. **The same produced video can be published to dev and prod
+independently**: the episode page has a *Publish to DEV* and a *Publish
+to PROD* button, and each environment's state (publishing / published /
+failed, YouTube URL, error) is tracked separately in
+`editorial.episode_publications` (one row per episode + environment).
+`Episode.publish_status/published_at/youtube_url` are a roll-up of those
+rows (any published -> "published"). A dev upload never blocks a later
+prod upload, and a failed prod attempt never changes dev's state. The
+PROD button stays disabled (tooltip: credentials not set) until all three
+`YOUTUBE_PROD_*` values are in `.env`. `POST /episodes/{id}/publish`
+takes `?environment=dev|prod` (default: `YOUTUBE_ENVIRONMENT`).
+`YOUTUBE_ENVIRONMENT` now only picks the default for that endpoint and
+which pair `app/scripts/youtube_oauth_setup.py` obtains a token for.
 
 **Current real status**: dev is fully set up and verified -- a real
 `/publish` call successfully uploaded episode #9 to the dev channel
@@ -639,9 +648,19 @@ environment; never reuse prod's project/client for dev):
    - App name / support email / developer email: e.g. "5squareFeed Dev"
      / `5squarefeed@gmail.com`
    - Scopes step: skip/save, not required here
-   - **Test users**: add your own Gmail here -- **required**, since
-     this app stays in "Testing" publishing status (unverified); Google
-     blocks sign-in for any account not explicitly listed here.
+   - **Test users**: add your own Gmail here -- **required** while the
+     app is in "Testing" publishing status; Google blocks sign-in for any
+     account not explicitly listed here.
+   - **Publishing status -> "In production"** (click **"Publish app"** on
+     the consent screen, for BOTH dev and prod projects). **Do this --
+     in "Testing" status Google expires the refresh token after 7 days**
+     and every publish then fails with
+     `invalid_grant: Bad Request` (this actually happened to the dev
+     token, issued 2026-09-21, dead by 2026-10-01). "In production" needs
+     no Google verification for your own account (you still see the
+     "unverified app" warning once at consent). If you set it *after*
+     getting a token, re-run Part 3 -- tokens issued while in Testing
+     keep their 7-day expiry.
 5. **Create the OAuth client**: "APIs & Services" -> "Credentials" ->
    **"+ Create Credentials"** -> **"OAuth client ID"**:
    - Application type: **Desktop app**
@@ -664,7 +683,7 @@ environment; never reuse prod's project/client for dev):
 3. It opens a browser to Google's consent screen. Sign in as the
    account from Part 1/2. You'll see an "unverified app" warning --
    click "Advanced" -> "Go to \<app name\> (unsafe)" (expected and
-   fine, it's your own app in Testing mode).
+   fine, it's your own unverified app).
 4. **If it asks which channel/brand account to use, pick the channel
    from Part 1** -- this is the step that actually links the credential
    to the right channel. If it doesn't ask (sometimes it just uses the
@@ -673,6 +692,34 @@ environment; never reuse prod's project/client for dev):
 5. The script prints a refresh token -- save it as
    `YOUTUBE_DEV_REFRESH_TOKEN` (or `YOUTUBE_PROD_REFRESH_TOKEN` for
    the prod run).
+   **Common OAuth errors and their cause:**
+   - `Error 403: access_denied` ("has not completed the Google
+     verification process ... can only be accessed by developer-approved
+     testers") -- the consent screen is in "Testing" status and the
+     Google account you signed in with is not listed. Fix in that
+     environment's Cloud project (APIs & Services -> OAuth consent
+     screen, or Google Auth Platform -> Audience): either **Publish app**
+     (preferred, see the "In production" note in Part 2) or add that exact
+     account under **Test users** (tokens then expire in 7 days). Used
+     for prod on 2026-10-01 (fixed via Test users).
+   - `unauthorized_client: Unauthorized` at publish time -- the refresh
+     token was issued by a different OAuth client than the client
+     ID/secret it is paired with in `.env` (e.g. the prod token was
+     minted while the script was still using the dev client). A token only
+     works with the client that issued it. Fix: set
+     `YOUTUBE_ENVIRONMENT=<env>` in `.env` (not just a shell variable),
+     re-run the setup script, check its first lines name the right env and
+     client ID, then replace only that environment's refresh token.
+   - `invalid_grant: Bad Request` -- token expired/revoked; usually the
+     7-day "Testing" expiry. Re-run Part 3.
+   - Pasting a token under the wrong key name (e.g. a second
+     `YOUTUBE_DEV_REFRESH_TOKEN` in the prod block) silently overrides
+     the first -- the last duplicate line wins. Keep exactly one line per
+     key.
+   - Quick check without publishing (from the repo root, host venv):
+     exchange each environment's refresh token against its own client at
+     `https://oauth2.googleapis.com/token` (`grant_type=refresh_token`);
+     a JSON `access_token` means that pair is good.
 6. **Restart is not enough** -- Docker Compose only re-reads `.env` on
    container *creation*, not a plain restart. After editing `.env`,
    run:

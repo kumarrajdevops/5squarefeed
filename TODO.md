@@ -2830,3 +2830,18 @@ whenever it does.
       (`sfx_story_gap.wav` in `render_episode`; old recipe kept in a comment there).
       `media/sfx_samples/` is now deletable scratch.
 - [x] Episode 6 re-produced with Jenny + glass ping + no chimes: 641.44 s video / 641.46 s audio, intro and outro voiced, ping measured at the intro boundary, polish_qa unchanged (only the known `static_scenes_static` fails), tests: 375 passing. Episodes 1-5 still have Guy narration and the old chimes until re-produced.
+- [x] Publish the same episode video to dev AND prod (prod credentials not set yet):
+      new table `editorial.episode_publications` (unique episode+environment; migration `e7b1c4d9a203`
+      backfills already-published episodes as `dev`); `POST /episodes/{id}/publish?environment=`;
+      task `publish_episode_to_youtube(episode_id, environment)`; `Episode.publish_*` is a roll-up
+      (`app/publishing/summary.py`). Dashboard shows Publish to DEV / Publish to PROD (PROD disabled
+      until `YOUTUBE_PROD_*` are set). Tests: `tests/test_multi_environment_publish.py`.
+      To enable prod later: set `YOUTUBE_PROD_*` in `.env` (run `youtube_oauth_setup.py` with
+      `YOUTUBE_ENVIRONMENT=prod`), then `docker compose up -d --force-recreate api worker`.
+- [x] YouTube OAuth gotcha (for future reference): **set the OAuth consent screen's publishing status to
+      "In production"** for each Cloud project (dev and prod). In "Testing" status refresh tokens expire
+      after 7 days -> publish fails with `invalid_grant: Bad Request` (dev token from 2026-09-21 failed on
+      2026-10-01). Fix = set "In production", then re-run `python -m app.scripts.youtube_oauth_setup`
+      (host machine; `YOUTUBE_ENVIRONMENT=prod` for prod), paste the token into `.env`, then
+      `docker compose up -d --force-recreate api worker`. Uploads from an unaudited API project stay
+      private regardless of the requested privacy.

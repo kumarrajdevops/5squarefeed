@@ -69,13 +69,15 @@ class YouTubeNotConfigured(Exception):
     """
 
 
-def _get_client():
-    if not settings.youtube_configured:
+def _get_client(environment: str | None = None):
+    env = environment or settings.youtube_environment
+    if not settings.youtube_configured_for(env):
         raise YouTubeNotConfigured(
-            "YOUTUBE_CLIENT_ID/YOUTUBE_CLIENT_SECRET/YOUTUBE_REFRESH_TOKEN are not "
+            f"YOUTUBE_{env.upper()}_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN are not "
             "all set in .env -- see README.md's Publishing section and run "
             "app/scripts/youtube_oauth_setup.py once to obtain a refresh token."
         )
+    client_id, client_secret, refresh_token = settings.youtube_credentials(env)
 
     # Imported lazily so importing this module (e.g. for
     # build_video_metadata() in tests) never requires the google client
@@ -85,9 +87,9 @@ def _get_client():
 
     credentials = Credentials(
         token=None,
-        refresh_token=settings.youtube_refresh_token,
-        client_id=settings.youtube_client_id,
-        client_secret=settings.youtube_client_secret,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
         token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/youtube.upload"],
     )
@@ -100,6 +102,7 @@ def upload_video(
     description: str,
     tags: list[str],
     privacy_status: str = "private",
+    environment: str | None = None,
 ) -> dict:
     """
     Upload `video_path` to the configured YouTube channel via the
@@ -115,7 +118,7 @@ def upload_video(
     """
     from googleapiclient.http import MediaFileUpload
 
-    client = _get_client()
+    client = _get_client(environment)
 
     body = {
         "snippet": {

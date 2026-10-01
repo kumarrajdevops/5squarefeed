@@ -268,6 +268,33 @@ class Episode(Base):
     publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class EpisodePublication(Base):
+    """
+    One row per (episode, YouTube environment) -- lets the same produced
+    video be published to dev and later to prod independently.
+    Episode.publish_* is the roll-up of these rows
+    (app/publishing/summary.py).
+    """
+
+    __tablename__ = "episode_publications"
+    __table_args__ = (
+        UniqueConstraint("episode_id", "environment", name="uq_episode_publications_episode_env"),
+        {"schema": "editorial"},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("editorial.episodes.id"), nullable=False, index=True
+    )
+    environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="publishing", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    youtube_video_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    youtube_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class EpisodeStory(Base):
     """
     One row per (episode, story) selection -- the actual Top-25 +
