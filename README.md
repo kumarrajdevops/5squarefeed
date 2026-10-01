@@ -360,7 +360,7 @@ The combined episode video opens with a light-surface branded intro
 card (the 5squareFeed lockup, loaded by path from
 `app/dashboard/branding/logo/5squarefeed-logo-primary.png`, plus the made-date under the tagline) with a
 spoken, captioned greeting ("Good morning! Welcome to 5squareFeed. Today's
-top tech news."), has a 0.6s left-to-right sweep transition + soft glass-ping SFX at every boundary (intro -> story, story -> story, story -> outro), and closes
+Top Tech Headlines."), has a 0.6s left-to-right sweep transition + soft glass-ping SFX at every boundary (intro -> story, story -> story, story -> outro), and closes
 with the same lockup card and a spoken, captioned sign-off ("Thanks for
 watching. See you tomorrow on 5squareFeed.") -- one continuous master audio
 track underneath (processed voice per story plus the two greetings, a ducked

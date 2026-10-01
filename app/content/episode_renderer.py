@@ -90,9 +90,9 @@ OUTRO_GAP = 0.6        # last story -> outro transition slot
 BUMPER_TAIL = 0.3      # minimum silence left after the last word
 BUMPERS = {
     "intro": {
-        "spoken": "Good morning! Welcome to Five square Feed. Today's top tech news.",
-        "captions": ["Good morning!", "Welcome to 5squareFeed.", "Today's top tech news."],
-        "lead": 0.6, "duration": INTRO_DUR,
+        "spoken": "Good morning! Welcome to Five square Feed. Today's Top Tech Headlines.",
+        "captions": ["Good morning!", "Welcome to 5squareFeed.", "Today's Top Tech Headlines."],
+        "lead": 0.5, "duration": INTRO_DUR,
     },
     "outro": {
         "spoken": "Thanks for watching. See you tomorrow on Five square Feed.",
