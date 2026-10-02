@@ -824,6 +824,7 @@ function renderStudioLayout(ep) {
   renderStoryList("primary-list", ep.primary, ep, true);
   renderStoryList("backup-list", ep.backup, ep, false);
   wireDragAndDrop(ep);
+  wireSwapCheckboxes(ep);
   wireJsonAudit(ep);
   wireHeaderButtons(ep);
 }
@@ -939,6 +940,7 @@ function renderStoryList(listId, stories, ep, jumpable) {
 
   ul.innerHTML = stories.map((s) => `
     <li class="story-row" draggable="true" data-story-id="${s.story_id}">
+      <input type="checkbox" class="story-swap-check" title="Tick two stories to swap their places"${ep.video_status === "producing" ? " disabled" : ""}>
       <span class="story-rank"${jumpable ? ' title="Jump player to here"' : ""}>${s.rank_position}</span>
       <div class="story-title-block" title="Click to edit script">
         <div class="story-title">${escapeHtml(s.title)}</div>
@@ -1044,6 +1046,65 @@ function wireDragAndDrop(ep) {
         dragged = null;
         await renderEpisodeStudio(ep.episode_id);
       });
+    });
+  });
+}
+
+// ---------------------------------------------------------
+// Swap by checkbox: tick two stories and they trade places
+// ---------------------------------------------------------
+
+// Pure planner. Same group -> the new full order for /reorder with the two
+// ids exchanged; one primary + one backup -> the /swap payload.
+function planStorySwap(primaryIds, backupIds, idA, idB) {
+  const inPrimary = (id) => primaryIds.includes(id);
+  const inBackup = (id) => backupIds.includes(id);
+  if (idA === idB || !(inPrimary(idA) || inBackup(idA)) || !(inPrimary(idB) || inBackup(idB))) {
+    return null;
+  }
+  if (inPrimary(idA) !== inPrimary(idB)) {
+    return {
+      kind: "swap",
+      primary_story_id: inPrimary(idA) ? idA : idB,
+      backup_story_id: inBackup(idA) ? idA : idB,
+    };
+  }
+  const group = inPrimary(idA) ? "primary" : "backup";
+  const order = (group === "primary" ? primaryIds : backupIds).slice();
+  const i = order.indexOf(idA);
+  const j = order.indexOf(idB);
+  [order[i], order[j]] = [order[j], order[i]];
+  return { kind: "reorder", group, story_ids: order };
+}
+
+function wireSwapCheckboxes(ep) {
+  const idsOf = (listId) => Array.from(document.querySelectorAll(`#${listId} li.story-row`))
+    .map((li) => parseInt(li.dataset.storyId, 10));
+  const boxes = Array.from(document.querySelectorAll("li.story-row .story-swap-check"));
+
+  boxes.forEach((box) => {
+    // The row is draggable and its title opens the editor; the checkbox must do neither.
+    box.addEventListener("click", (e) => e.stopPropagation());
+    box.addEventListener("change", async () => {
+      const ticked = boxes.filter((b) => b.checked);
+      if (ticked.length < 2) return;
+
+      boxes.forEach((b) => { b.disabled = true; });
+      const [idA, idB] = ticked.map((b) => parseInt(b.closest("li").dataset.storyId, 10));
+      const plan = planStorySwap(idsOf("primary-list"), idsOf("backup-list"), idA, idB);
+      try {
+        if (plan && plan.kind === "swap") {
+          await apiPost(`/episodes/${ep.episode_id}/swap`, {
+            primary_story_id: plan.primary_story_id,
+            backup_story_id: plan.backup_story_id,
+          });
+        } else if (plan) {
+          await apiPost(`/episodes/${ep.episode_id}/reorder`, { story_ids: plan.story_ids });
+        }
+      } catch (err) {
+        alert("Swap failed: " + err.message);
+      }
+      await renderEpisodeStudio(ep.episode_id);
     });
   });
 }
