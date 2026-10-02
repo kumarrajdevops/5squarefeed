@@ -12,7 +12,7 @@ from app.worker.celery_app import celery_app
 
 
 @celery_app.task
-def publish_episode_to_youtube(episode_id: int, environment: str | None = None) -> dict:
+def publish_episode_to_youtube(episode_id: int, environment: str | None = None, publication_id: int | None = None) -> dict:
     """
     Upload an already-approved, already-produced episode's combined
     video to YouTube (see app/publishing/youtube_publisher.py).
@@ -23,11 +23,11 @@ def publish_episode_to_youtube(episode_id: int, environment: str | None = None) 
     publish_status to "publishing" synchronously before queuing this
     task, same status-flip-in-the-endpoint pattern as Produce/QA.
 
-    `environment` ("dev"/"prod") picks the credential set/channel; the
-    same produced video can be published to each environment once (one
-    EpisodePublication row per environment, rolled up into
-    Episode.publish_* by refresh_publish_summary). Defaults to
-    YOUTUBE_ENVIRONMENT.
+    `environment` ("dev"/"prod") picks the credential set/channel. Each
+    upload is its own EpisodePublication row (sequence 1, 2, 3 ... per
+    environment), rolled up into Episode.publish_* by
+    refresh_publish_summary; `publication_id` names the row the endpoint
+    created for this upload. Defaults to YOUTUBE_ENVIRONMENT.
 
     Always logs and returns which environment (dev/prod --
     separate credentials AND separate destination channels, see
@@ -45,11 +45,15 @@ def publish_episode_to_youtube(episode_id: int, environment: str | None = None) 
         if episode is None:
             return {"episode_id": episode_id, "status": "failed", "error": "Episode not found"}
 
-        publication = (
-            db.query(EpisodePublication)
-            .filter(EpisodePublication.episode_id == episode_id, EpisodePublication.environment == environment)
-            .one_or_none()
-        )
+        if publication_id is not None:
+            publication = db.get(EpisodePublication, publication_id)
+        else:
+            publication = (
+                db.query(EpisodePublication)
+                .filter(EpisodePublication.episode_id == episode_id, EpisodePublication.environment == environment)
+                .order_by(EpisodePublication.sequence.desc())
+                .first()
+            )
         if publication is None:
             publication = EpisodePublication(
                 episode_id=episode_id, environment=environment, status="publishing",

@@ -745,9 +745,9 @@ function renderStudioLayout(ep) {
     const pub = pubs[env] || { status: "not_published", configured: false };
     let label = `Publish to ${env.toUpperCase()}`;
     if (pub.status === "publishing") label = `Publishing ${env.toUpperCase()}… 0:00`;
-    else if (pub.status === "published") label = `Published ${env.toUpperCase()} ✓`;
+    else if (pub.status === "published") label = `Publish again to ${env.toUpperCase()} (#${(pub.count || 1) + 1})`;
     else if (pub.status === "failed") label = `Retry ${env.toUpperCase()}`;
-    const blocked = pub.status === "publishing" || pub.status === "published" || !pub.configured;
+    const blocked = pub.status === "publishing" || !pub.configured;
     const title = pub.configured
       ? `Upload this episode's video to the ${env.toUpperCase()} YouTube channel`
       : `${env.toUpperCase()} YouTube credentials are not set in .env yet`;
@@ -755,14 +755,16 @@ function renderStudioLayout(ep) {
   }).join("");
   const publishLinksHtml = PUBLISH_ENVS.map((env) => {
     const pub = pubs[env];
-    if (!pub) return "";
-    if (pub.status === "published" && pub.youtube_url) {
-      return `<p class="meta">Published (${env}): <a href="${pub.youtube_url}" target="_blank" rel="noopener">${pub.youtube_url}</a></p>`;
-    }
-    if (pub.status === "failed" && pub.error) {
-      return `<p class="meta publish-error">Publish to ${env} failed: ${escapeHtml(pub.error)}</p>`;
-    }
-    return "";
+    if (!pub || !pub.history) return "";
+    return pub.history.map((h) => {
+      if (h.status === "published" && h.youtube_url) {
+        return `<p class="meta">Publication #${h.sequence} (${env}), ${formatDateTime(h.published_at)}: <a href="${h.youtube_url}" target="_blank" rel="noopener">${h.youtube_url}</a></p>`;
+      }
+      if (h.status === "failed" && h.error) {
+        return `<p class="meta publish-error">Publication #${h.sequence} to ${env} failed: ${escapeHtml(h.error)}</p>`;
+      }
+      return "";
+    }).join("");
   }).join("");
 
   app.innerHTML = `
@@ -1248,8 +1250,11 @@ function wireHeaderButtons(ep) {
 
     document.getElementById(`btn-publish-${env}`).addEventListener("click", async () => {
       const startTime = Date.now();
+      const already = (ep.publications || {})[env];
+      const repost = !!already && already.status === "published";
+      if (repost && !confirm(`Episode ${ep.episode_id} is already published to ${env.toUpperCase()} ${already.count} time(s). Upload it again as publication #${already.count + 1}?`)) return;
       try {
-        await apiPost(`/episodes/${ep.episode_id}/publish?environment=${env}`);
+        await apiPost(`/episodes/${ep.episode_id}/publish?environment=${env}${repost ? "&repost=true" : ""}`);
         startPublishPolling(ep, env, startTime);
       } catch (err) {
         alert("Failed to queue publish: " + err.message);

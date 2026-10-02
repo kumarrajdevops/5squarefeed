@@ -270,15 +270,16 @@ class Episode(Base):
 
 class EpisodePublication(Base):
     """
-    One row per (episode, YouTube environment) -- lets the same produced
-    video be published to dev and later to prod independently.
+    One row per upload: (episode, YouTube environment, sequence). The same
+    produced video can go to dev and prod independently, and each environment
+    can be published again later (sequence 2, 3, ...), e.g. after a re-Produce.
     Episode.publish_* is the roll-up of these rows
     (app/publishing/summary.py).
     """
 
     __tablename__ = "episode_publications"
     __table_args__ = (
-        UniqueConstraint("episode_id", "environment", name="uq_episode_publications_episode_env"),
+        UniqueConstraint("episode_id", "environment", "sequence", name="uq_episode_publications_episode_env_seq"),
         {"schema": "editorial"},
     )
 
@@ -287,6 +288,7 @@ class EpisodePublication(Base):
         ForeignKey("editorial.episodes.id"), nullable=False, index=True
     )
     environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="publishing", nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -806,7 +806,7 @@ def reprocess_episode_endpoint(episode_id: int):
 
 
 @app.post("/api/v1/episodes/{episode_id}/publish")
-def trigger_episode_publish(episode_id: int, environment: str | None = None):
+def trigger_episode_publish(episode_id: int, environment: str | None = None, repost: bool = False):
     """
     Publish an approved, produced episode to YouTube (see
     app/tasks/publishing.py). Manual trigger only, matching Produce/
@@ -847,19 +847,28 @@ def trigger_episode_publish(episode_id: int, environment: str | None = None):
                 detail="Episode has no produced video yet -- run Produce first.",
             )
 
-        publication = (
+        latest = (
             db.query(EpisodePublication)
             .filter(EpisodePublication.episode_id == episode_id, EpisodePublication.environment == environment)
-            .one_or_none()
+            .order_by(EpisodePublication.sequence.desc())
+            .first()
         )
-        if publication is not None and publication.status in ("published", "publishing"):
+        if latest is not None and latest.status == "publishing":
+            raise HTTPException(status_code=409, detail=f"Episode is already publishing to {environment}.")
+        if latest is not None and latest.status == "published" and not repost:
             raise HTTPException(
                 status_code=409,
-                detail=f"Episode is already {publication.status} to {environment}.",
+                detail=f"Episode is already published to {environment} (publication #{latest.sequence}); "
+                "pass repost=true to upload it again as a new publication.",
             )
         now = datetime.now(timezone.utc)
-        if publication is None:
-            publication = EpisodePublication(episode_id=episode_id, environment=environment)
+        if latest is not None and latest.status == "failed":
+            publication = latest  # retry the failed upload in place
+        else:
+            publication = EpisodePublication(
+                episode_id=episode_id, environment=environment,
+                sequence=(latest.sequence + 1) if latest is not None else 1,
+            )
             db.add(publication)
         publication.status = "publishing"
         publication.started_at = now
@@ -868,22 +877,37 @@ def trigger_episode_publish(episode_id: int, environment: str | None = None):
         episode.publish_started_at = now
         refresh_publish_summary(db, episode)
         db.commit()
+        publication_id = publication.id
 
-    task = publish_episode_to_youtube.delay(episode_id, environment)
+    task = publish_episode_to_youtube.delay(episode_id, environment, publication_id)
     return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
 
 
 def _serialize_publications(db, episode: Episode) -> dict:
     """Per-environment publish state for the dashboard's dev/prod
     Publish buttons (configured = credentials present in .env)."""
-    rows = {
-        r.environment: r
-        for r in db.query(EpisodePublication).filter(EpisodePublication.episode_id == episode.id).all()
-    }
+    by_env: dict[str, list] = {}
+    for r in (
+        db.query(EpisodePublication)
+        .filter(EpisodePublication.episode_id == episode.id)
+        .order_by(EpisodePublication.sequence.asc())
+        .all()
+    ):
+        by_env.setdefault(r.environment, []).append(r)
     out = {}
     for env in ENVIRONMENTS:
-        r = rows.get(env)
+        history = by_env.get(env, [])
+        r = history[-1] if history else None  # latest publication drives the button
         out[env] = {
+            "count": sum(1 for h in history if h.status == "published"),
+            "history": [
+                {
+                    "sequence": h.sequence, "status": h.status, "published_at": h.published_at,
+                    "youtube_url": h.youtube_url, "error": h.error,
+                }
+                for h in history
+            ],
+            "sequence": r.sequence if r else None,
             "configured": settings.youtube_configured_for(env),
             "status": r.status if r else "not_published",
             "started_at": r.started_at if r else None,
