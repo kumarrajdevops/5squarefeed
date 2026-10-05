@@ -24,3 +24,17 @@ def test_compute_start_offset_matches_canonical_renderer_timing():
     assert result.returncode == 0, (
         f"compute_start_offset.node.js failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+SWAP_NODE_TEST = Path(__file__).parent / "dashboard" / "plan_story_swap.node.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed in this environment")
+def test_plan_story_swap_exchanges_the_two_ticked_stories():
+    result = subprocess.run(
+        ["node", str(SWAP_NODE_TEST)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"plan_story_swap.node.js failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )

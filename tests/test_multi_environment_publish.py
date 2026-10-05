@@ -52,7 +52,7 @@ def test_publish_to_dev_then_prod_independently(monkeypatch, factory, episode_id
     delay = _queue(monkeypatch, factory)
 
     main.trigger_episode_publish(episode_id, "dev")
-    delay.assert_called_with(episode_id, "dev")
+    delay.assert_called_with(episode_id, "dev", 1)
 
     with factory() as db:
         pub = db.query(EpisodePublication).one()
@@ -62,7 +62,7 @@ def test_publish_to_dev_then_prod_independently(monkeypatch, factory, episode_id
 
     # dev done; prod is still publishable from the same video.
     main.trigger_episode_publish(episode_id, "prod")
-    delay.assert_called_with(episode_id, "prod")
+    delay.assert_called_with(episode_id, "prod", 2)
 
     with factory() as db:
         rows = {r.environment: r.status for r in db.query(EpisodePublication).all()}
@@ -70,7 +70,7 @@ def test_publish_to_dev_then_prod_independently(monkeypatch, factory, episode_id
         assert db.get(Episode, episode_id).publish_status == "publishing"
 
 
-def test_cannot_publish_same_environment_twice(monkeypatch, factory, episode_id):
+def test_publishing_again_needs_repost_and_records_next_sequence(monkeypatch, factory, episode_id):
     _queue(monkeypatch, factory)
     main.trigger_episode_publish(episode_id, "dev")
     with factory() as db:
@@ -80,6 +80,37 @@ def test_cannot_publish_same_environment_twice(monkeypatch, factory, episode_id)
     with pytest.raises(HTTPException) as exc:
         main.trigger_episode_publish(episode_id, "dev")
     assert exc.value.status_code == 409
+
+    main.trigger_episode_publish(episode_id, "dev", repost=True)
+    with factory() as db:
+        rows = db.query(EpisodePublication).order_by(EpisodePublication.sequence).all()
+        assert [(r.sequence, r.status) for r in rows] == [(1, "published"), (2, "publishing")]
+
+    # a second repost while #2 is still uploading is refused
+    with pytest.raises(HTTPException) as exc:
+        main.trigger_episode_publish(episode_id, "dev", repost=True)
+    assert exc.value.status_code == 409
+
+
+def test_task_records_each_upload_as_its_own_publication(monkeypatch, factory, episode_id):
+    monkeypatch.setattr(publishing, "SessionLocal", factory)
+    uploads = iter(["v1", "v2"])
+    monkeypatch.setattr(
+        publishing, "upload_video", lambda **kw: {"video_id": (v := next(uploads)), "url": f"https://youtu.be/{v}"}
+    )
+    delay = _queue(monkeypatch, factory)
+
+    main.trigger_episode_publish(episode_id, "prod")
+    publish_episode_to_youtube(episode_id, "prod", delay.call_args.args[2])
+    main.trigger_episode_publish(episode_id, "prod", repost=True)
+    publish_episode_to_youtube(episode_id, "prod", delay.call_args.args[2])
+
+    with factory() as db:
+        rows = db.query(EpisodePublication).order_by(EpisodePublication.sequence).all()
+        assert [(r.sequence, r.youtube_url) for r in rows] == [(1, "https://youtu.be/v1"), (2, "https://youtu.be/v2")]
+        assert db.get(Episode, episode_id).youtube_url == "https://youtu.be/v2"
+        pubs = main._serialize_publications(db, db.get(Episode, episode_id))
+        assert pubs["prod"]["count"] == 2 and len(pubs["prod"]["history"]) == 2
 
 
 def test_failed_publish_can_be_retried(monkeypatch, factory, episode_id):

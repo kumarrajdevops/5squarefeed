@@ -359,7 +359,7 @@ ul.story-list { list-style: none; margin: 0; padding: 0; }
 
 li.story-row {
   display: grid;
-  grid-template-columns: 28px 1fr auto;
+  grid-template-columns: 18px 28px 1fr auto;
   align-items: center;
   gap: 10px;
   padding: 9px 8px;
@@ -374,6 +374,8 @@ li.story-row {
   align-items: flex-end;
   gap: 4px;
 }
+
+.story-swap-check { margin: 0; width: 16px; height: 16px; cursor: pointer; }
 
 li.story-row:hover { background: var(--surface-2); }
 li.story-row.drag-over { border-color: var(--accent); background: var(--surface-2); }

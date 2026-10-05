@@ -745,9 +745,9 @@ function renderStudioLayout(ep) {
     const pub = pubs[env] || { status: "not_published", configured: false };
     let label = `Publish to ${env.toUpperCase()}`;
     if (pub.status === "publishing") label = `Publishing ${env.toUpperCase()}… 0:00`;
-    else if (pub.status === "published") label = `Published ${env.toUpperCase()} ✓`;
+    else if (pub.status === "published") label = `Publish again to ${env.toUpperCase()} (#${(pub.count || 1) + 1})`;
     else if (pub.status === "failed") label = `Retry ${env.toUpperCase()}`;
-    const blocked = pub.status === "publishing" || pub.status === "published" || !pub.configured;
+    const blocked = pub.status === "publishing" || !pub.configured;
     const title = pub.configured
       ? `Upload this episode's video to the ${env.toUpperCase()} YouTube channel`
       : `${env.toUpperCase()} YouTube credentials are not set in .env yet`;
@@ -755,14 +755,16 @@ function renderStudioLayout(ep) {
   }).join("");
   const publishLinksHtml = PUBLISH_ENVS.map((env) => {
     const pub = pubs[env];
-    if (!pub) return "";
-    if (pub.status === "published" && pub.youtube_url) {
-      return `<p class="meta">Published (${env}): <a href="${pub.youtube_url}" target="_blank" rel="noopener">${pub.youtube_url}</a></p>`;
-    }
-    if (pub.status === "failed" && pub.error) {
-      return `<p class="meta publish-error">Publish to ${env} failed: ${escapeHtml(pub.error)}</p>`;
-    }
-    return "";
+    if (!pub || !pub.history) return "";
+    return pub.history.map((h) => {
+      if (h.status === "published" && h.youtube_url) {
+        return `<p class="meta">Publication #${h.sequence} (${env}), ${formatDateTime(h.published_at)}: <a href="${h.youtube_url}" target="_blank" rel="noopener">${h.youtube_url}</a></p>`;
+      }
+      if (h.status === "failed" && h.error) {
+        return `<p class="meta publish-error">Publication #${h.sequence} to ${env} failed: ${escapeHtml(h.error)}</p>`;
+      }
+      return "";
+    }).join("");
   }).join("");
 
   app.innerHTML = `
@@ -824,6 +826,7 @@ function renderStudioLayout(ep) {
   renderStoryList("primary-list", ep.primary, ep, true);
   renderStoryList("backup-list", ep.backup, ep, false);
   wireDragAndDrop(ep);
+  wireSwapCheckboxes(ep);
   wireJsonAudit(ep);
   wireHeaderButtons(ep);
 }
@@ -939,6 +942,7 @@ function renderStoryList(listId, stories, ep, jumpable) {
 
   ul.innerHTML = stories.map((s) => `
     <li class="story-row" draggable="true" data-story-id="${s.story_id}">
+      <input type="checkbox" class="story-swap-check" title="Tick two stories to swap their places"${ep.video_status === "producing" ? " disabled" : ""}>
       <span class="story-rank"${jumpable ? ' title="Jump player to here"' : ""}>${s.rank_position}</span>
       <div class="story-title-block" title="Click to edit script">
         <div class="story-title">${escapeHtml(s.title)}</div>
@@ -1044,6 +1048,65 @@ function wireDragAndDrop(ep) {
         dragged = null;
         await renderEpisodeStudio(ep.episode_id);
       });
+    });
+  });
+}
+
+// ---------------------------------------------------------
+// Swap by checkbox: tick two stories and they trade places
+// ---------------------------------------------------------
+
+// Pure planner. Same group -> the new full order for /reorder with the two
+// ids exchanged; one primary + one backup -> the /swap payload.
+function planStorySwap(primaryIds, backupIds, idA, idB) {
+  const inPrimary = (id) => primaryIds.includes(id);
+  const inBackup = (id) => backupIds.includes(id);
+  if (idA === idB || !(inPrimary(idA) || inBackup(idA)) || !(inPrimary(idB) || inBackup(idB))) {
+    return null;
+  }
+  if (inPrimary(idA) !== inPrimary(idB)) {
+    return {
+      kind: "swap",
+      primary_story_id: inPrimary(idA) ? idA : idB,
+      backup_story_id: inBackup(idA) ? idA : idB,
+    };
+  }
+  const group = inPrimary(idA) ? "primary" : "backup";
+  const order = (group === "primary" ? primaryIds : backupIds).slice();
+  const i = order.indexOf(idA);
+  const j = order.indexOf(idB);
+  [order[i], order[j]] = [order[j], order[i]];
+  return { kind: "reorder", group, story_ids: order };
+}
+
+function wireSwapCheckboxes(ep) {
+  const idsOf = (listId) => Array.from(document.querySelectorAll(`#${listId} li.story-row`))
+    .map((li) => parseInt(li.dataset.storyId, 10));
+  const boxes = Array.from(document.querySelectorAll("li.story-row .story-swap-check"));
+
+  boxes.forEach((box) => {
+    // The row is draggable and its title opens the editor; the checkbox must do neither.
+    box.addEventListener("click", (e) => e.stopPropagation());
+    box.addEventListener("change", async () => {
+      const ticked = boxes.filter((b) => b.checked);
+      if (ticked.length < 2) return;
+
+      boxes.forEach((b) => { b.disabled = true; });
+      const [idA, idB] = ticked.map((b) => parseInt(b.closest("li").dataset.storyId, 10));
+      const plan = planStorySwap(idsOf("primary-list"), idsOf("backup-list"), idA, idB);
+      try {
+        if (plan && plan.kind === "swap") {
+          await apiPost(`/episodes/${ep.episode_id}/swap`, {
+            primary_story_id: plan.primary_story_id,
+            backup_story_id: plan.backup_story_id,
+          });
+        } else if (plan) {
+          await apiPost(`/episodes/${ep.episode_id}/reorder`, { story_ids: plan.story_ids });
+        }
+      } catch (err) {
+        alert("Swap failed: " + err.message);
+      }
+      await renderEpisodeStudio(ep.episode_id);
     });
   });
 }
@@ -1187,8 +1250,11 @@ function wireHeaderButtons(ep) {
 
     document.getElementById(`btn-publish-${env}`).addEventListener("click", async () => {
       const startTime = Date.now();
+      const already = (ep.publications || {})[env];
+      const repost = !!already && already.status === "published";
+      if (repost && !confirm(`Episode ${ep.episode_id} is already published to ${env.toUpperCase()} ${already.count} time(s). Upload it again as publication #${already.count + 1}?`)) return;
       try {
-        await apiPost(`/episodes/${ep.episode_id}/publish?environment=${env}`);
+        await apiPost(`/episodes/${ep.episode_id}/publish?environment=${env}${repost ? "&repost=true" : ""}`);
         startPublishPolling(ep, env, startTime);
       } catch (err) {
         alert("Failed to queue publish: " + err.message);
