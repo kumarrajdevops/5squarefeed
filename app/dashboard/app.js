@@ -692,7 +692,15 @@ async function renderEpisodeStudio(episodeId) {
     return;
   }
 
-  renderStudioLayout(currentEpisode);
+  // The storyboard report is a convenience panel -- never block the page on it.
+  let storyboardReport = null;
+  try {
+    storyboardReport = await apiGet(`/episodes/${episodeId}/storyboard`);
+  } catch (err) {
+    storyboardReport = null;
+  }
+
+  renderStudioLayout(currentEpisode, storyboardReport);
 }
 
 function qaIsStale(ep) {
@@ -751,7 +759,8 @@ function renderPipelineChartHtml(pipeline) {
   `;
 }
 
-function renderStudioLayout(ep) {
+function renderStudioLayout(ep, storyboardReport) {
+  const sbRunning = !!storyboardReport && storyboardReport.status === "running";
   const producing = ep.video_status === "producing";
   const qaStale = qaIsStale(ep);
   const pubs = ep.publications || {};
@@ -797,7 +806,8 @@ function renderStudioLayout(ep) {
         ${publishLinksHtml}
       </div>
       <div class="studio-actions">
-        <button class="btn" id="btn-produce" type="button" ${producing ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
+        <button class="btn" id="btn-storyboard" type="button" ${producing || sbRunning ? "disabled" : ""}>${sbRunning ? "Storyboard… 0:00" : "Storyboard"}</button>
+        <button class="btn" id="btn-produce" type="button" ${producing || sbRunning ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
         <button class="btn${qaStale ? " btn-warn" : ""}" id="btn-qa" type="button" ${producing ? "disabled" : ""}>${qaStale ? "Run QA ⚠ (stale)" : "Run QA"}</button>
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
@@ -806,6 +816,8 @@ function renderStudioLayout(ep) {
     </div>
 
     ${renderPipelineChartHtml(ep.pipeline)}
+
+    ${renderStoryboardPanelHtml(storyboardReport)}
 
     ${ep.video_url
       ? `<video class="player" id="player" controls src="${cacheBust(ep.video_url, ep.video_produced_at)}"></video>`
@@ -843,6 +855,7 @@ function renderStudioLayout(ep) {
   wireSwapCheckboxes(ep);
   wireJsonAudit(ep);
   wireHeaderButtons(ep);
+  wireStoryboardButton(ep, storyboardReport);
 }
 
 // Raw episode JSON at the bottom of the Studio view, for audit --
@@ -1221,6 +1234,89 @@ function startPublishPolling(ep, env, startTime) {
       // Transient fetch error -- keep polling, next tick will retry.
     }
   }, 3000);
+}
+
+// Storyboard check -- Build/reuse every primary story's storyboard and list
+// anything wrong, before the long Process render (app/tasks/episode_storyboard.py).
+function renderStoryboardPanelHtml(report) {
+  if (!report || report.status === "none") return "";
+
+  if (report.status === "running") {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p class="loading">Checking storyboards… ${report.processed || 0} of ${report.total || "?"} stories done.</p></div>`;
+  }
+
+  if (report.status === "failed") {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p class="error">Storyboard check failed: ${escapeHtml(report.error || "unknown error")}</p></div>`;
+  }
+
+  const problems = report.problems || [];
+    const summary = `${report.total} stories checked (${report.built} built, ${report.reused} reused).`;
+
+  if (problems.length === 0) {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p><span class="pill pass">OK</span> ${summary} No problems found.</p></div>`;
+  }
+
+  const rows = problems.map((p) => {
+    const issues = p.issues.map((i) => `
+      <p class="sb-issue"><span class="pill ${i.severity === "error" ? "fail" : "warn"}">${i.severity === "error" ? "ERROR" : "WARN"}</span><span>
+        ${escapeHtml(i.stage)} &mdash; ${escapeHtml(i.message)}</span></p>`).join("");
+    return `<li class="sb-row"><p class="sb-name">#${p.rank}${p.backup ? " (backup)" : ""} &middot; story ${p.story_id} &mdash; ${escapeHtml(p.headline)}</p>${issues}</li>`;
+  }).join("");
+
+  return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+    <p><span class="pill fail">${problems.length} could not be built</span> ${summary}
+      </p>
+    <ol class="sb-list">${rows}</ol></div>`;
+}
+
+function startStoryboardPolling(ep, startTime) {
+  const btn = document.getElementById("btn-storyboard");
+  const produceBtn = document.getElementById("btn-produce");
+  const qaBtn = document.getElementById("btn-qa");
+  if (!btn) return;
+
+  btn.disabled = true;
+  if (produceBtn) produceBtn.disabled = true;
+  if (qaBtn) qaBtn.disabled = true;
+
+  const tick = () => { btn.textContent = `Storyboard… ${formatElapsed(Date.now() - startTime)}`; };
+  tick();
+  const timerInterval = setInterval(tick, 1000);
+
+  const pollInterval = setInterval(async () => {
+    try {
+      const fresh = await apiGet(`/episodes/${ep.episode_id}/storyboard`);
+      if (fresh.status !== "running") {
+        clearInterval(timerInterval);
+        clearInterval(pollInterval);
+        await renderEpisodeStudio(ep.episode_id);
+      }
+    } catch (err) {
+      // Transient fetch error -- keep polling, next tick will retry.
+    }
+  }, 3000);
+}
+
+function wireStoryboardButton(ep, report) {
+  const btn = document.getElementById("btn-storyboard");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    const startTime = Date.now();
+    try {
+      await apiPost(`/episodes/${ep.episode_id}/storyboard`);
+      startStoryboardPolling(ep, startTime);
+    } catch (err) {
+      alert("Failed to start storyboard check: " + err.message);
+    }
+  });
+
+  if (report && report.status === "running") {
+    startStoryboardPolling(ep, report.started_at ? new Date(report.started_at).getTime() : Date.now());
+  }
 }
 
 function wireHeaderButtons(ep) {

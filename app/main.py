@@ -20,6 +20,8 @@ from app.tasks.content import produce_story_video_task
 from app.tasks.content_dedup import run_enrich_and_dedup_by_content
 from app.tasks.dedup import run_deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
+from app.tasks.episode_storyboard import read_report as read_storyboard_report
+from app.tasks.episode_storyboard import run_episode_storyboards, start_report as start_storyboard_report
 from app.tasks.episode_video import produce_episode_video
 from app.tasks.publishing import publish_episode_to_youtube
 from app.tasks.ranking import (
@@ -571,6 +573,41 @@ def process_episode(episode_id: int):
     /produce) to preserve existing callers/compatibility.
     """
     return trigger_episode_production(episode_id)
+
+
+@app.post("/api/v1/episodes/{episode_id}/storyboard")
+def trigger_episode_storyboard(episode_id: int):
+    """
+    Build (or reuse) content, audio and the storyboard for every primary
+    story, then report what is wrong (storyboard QA failures, stories
+    that could not be built) -- the first half of Process, runnable on
+    its own so problems show up before the long render. Process later
+    reuses everything built here. The report is written as "running"
+    here, synchronously, before queueing (same race as Produce).
+    """
+    with SessionLocal() as db:
+        episode = db.get(Episode, episode_id)
+
+        if episode is None:
+            raise HTTPException(status_code=404, detail="Episode not found.")
+
+        if episode.video_status == "producing":
+            raise HTTPException(status_code=409, detail="Episode is being processed; try again when it finishes.")
+
+    existing = read_storyboard_report(episode_id)
+    if existing is not None and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="A storyboard check is already running for this episode.")
+
+    start_storyboard_report(episode_id)
+    task = run_episode_storyboards.delay(episode_id)
+    return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
+@app.get("/api/v1/episodes/{episode_id}/storyboard")
+def get_episode_storyboard(episode_id: int):
+    """Latest storyboard report for the episode, or status "none"."""
+    report = read_storyboard_report(episode_id)
+    return report if report is not None else {"episode_id": episode_id, "status": "none"}
 
 
 @app.post("/api/v1/episodes/{episode_id}/qa")
