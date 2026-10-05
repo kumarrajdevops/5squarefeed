@@ -253,6 +253,97 @@ def _create_episode_or_recover(
         return None, result
 
 
+def _free_positions(used: set[int], first: int, last: int) -> list[int]:
+    return [p for p in range(first, last + 1) if p not in used]
+
+
+def _update_draft_episode(db, episode: Episode, now: datetime) -> dict:
+    """
+    Re-running selection for an episode that is still a draft: the
+    first run's stories stick. Every existing EpisodeStory row (primary
+    and backup, with its rank_position and any dashboard reorder/swap)
+    is left exactly as it is; only slots still empty (primary < 25,
+    backup < 5) are filled, best-scoring new story first, into the
+    lowest free positions of the group (primary 1-25, backup 26-30).
+
+    A new story whose content-dedup repeats_story_id points at a story
+    already in this episode is skipped -- it covers the same event the
+    episode already has.
+
+    Once the episode is approved (or rejected/published) the caller
+    never reaches this: classify_existing_episode blocks those, and
+    reprocess is the only way to redo a rejected one.
+    """
+
+    existing_rows = (
+        db.query(EpisodeStory).filter(EpisodeStory.episode_id == episode.id).all()
+    )
+    kept_ids = {row.story_id for row in existing_rows}
+    used_positions = {row.rank_position for row in existing_rows}
+    primary_count = sum(1 for row in existing_rows if row.selection_status == "primary")
+    backup_count = len(existing_rows) - primary_count
+
+    scored, _top, already_primary_story_ids, content_repeats_flagged = (
+        _score_and_select_top_stories(db, now, episode.episode_date)
+    )
+
+    candidates = []
+    skipped_repeats = 0
+    for entry in scored:
+        item, state = entry[0], entry[1]
+        if item.id in kept_ids:
+            continue
+        if state.repeats_story_id is not None and state.repeats_story_id in kept_ids:
+            skipped_repeats += 1
+            continue
+        candidates.append(entry)
+
+    primary_free = _free_positions(used_positions, 1, PRIMARY_SLOTS)[: max(0, PRIMARY_SLOTS - primary_count)]
+    backup_free = _free_positions(used_positions, PRIMARY_SLOTS + 1, TOTAL_SLOTS)[: max(0, BACKUP_SLOTS - backup_count)]
+
+    additions = [(pos, "primary") for pos in primary_free] + [(pos, "backup") for pos in backup_free]
+
+    added_primary = 0
+    added_backup = 0
+    for (position, status), (item, state, score, reason) in zip(additions, candidates):
+        db.add(EpisodeStory(
+            episode_id=episode.id,
+            story_id=item.id,
+            rank_position=position,
+            selection_status=status,
+            rank_score=score,
+            rank_reason=reason,
+        ))
+        if status == "primary":
+            added_primary += 1
+        else:
+            added_backup += 1
+
+    if added_primary or added_backup:
+        episode.content_changed_at = now
+
+    db.commit()
+
+    result = {
+        "episode_id": episode.id,
+        "episode_date": episode.episode_date.isoformat(),
+        "created": False,
+        "updated": True,
+        "reason": "existing_draft_updated",
+        "kept_stories": len(existing_rows),
+        "added_primary": added_primary,
+        "added_backup": added_backup,
+        "primary_total": primary_count + added_primary,
+        "backup_total": backup_count + added_backup,
+        "eligible_new": len(candidates),
+        "skipped_repeats_of_episode": skipped_repeats,
+    }
+
+    print(f"[ranking] Draft episode updated, first-run stories kept: {result}")
+
+    return result
+
+
 def _run_ranking_selection(db, episode_date: date, now: datetime) -> dict:
     """
     The actual idempotent selection logic, taking `db` explicitly so it
@@ -268,11 +359,14 @@ def _run_ranking_selection(db, episode_date: date, now: datetime) -> dict:
 
     - No existing Episode for episode_date -> create one, as before.
     - Existing Episode found -> never create another. A draft is
-      reused as-is (its EpisodeStory rows are NOT touched -- use the
-      explicit reprocess endpoint for that); rejected/approved/
-      published are blocked outright, since normal selection must
-      never silently resurrect a rejection, invalidate an approval, or
-      touch anything already live. See _existing_episode_result().
+      UPDATED in place (_update_draft_episode): its first-run
+      EpisodeStory rows stay untouched and only empty slots are
+      topped up from newly eligible stories -- the explicit reprocess
+      endpoint is still the only way to replace the selection.
+      rejected/approved/published are blocked outright, since normal
+      selection must never silently resurrect a rejection, invalidate
+      an approval, or touch anything already live. See
+      _existing_episode_result().
     - More than one existing Episode for episode_date (only possible
       for historical data from before this constraint existed) ->
       blocked, every candidate id reported, never guessed at.
@@ -289,6 +383,8 @@ def _run_ranking_selection(db, episode_date: date, now: datetime) -> dict:
 
     blocked_result = _classify_episode_lookup(existing_episodes, episode_date)
     if blocked_result is not None:
+        if blocked_result.get("reason") == "existing_draft_reused":
+            return _update_draft_episode(db, existing_episodes[0], now)
         print(f"[ranking] Not creating a new episode: {blocked_result}")
         return blocked_result
 

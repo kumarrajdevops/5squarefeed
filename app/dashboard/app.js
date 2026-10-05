@@ -337,6 +337,16 @@ function wireCollectButton() {
 
 let processCollapseTimer = null;
 
+function formatRankUpdate(r) {
+  const added = (r.added_primary ?? 0) + (r.added_backup ?? 0);
+  const totals = `now ${r.primary_total ?? "?"} primary, ${r.backup_total ?? "?"} backup`;
+  if (added === 0) {
+    return `episode #${r.episode_id} already up to date -- kept all ${r.kept_stories ?? "?"} first-run stories, nothing new to add (${totals}).`;
+  }
+  return `episode #${r.episode_id} updated -- kept ${r.kept_stories ?? "?"} first-run stories, ` +
+    `added ${r.added_primary ?? 0} primary + ${r.added_backup ?? 0} backup (${totals}).`;
+}
+
 function formatProcessSummary(result) {
   const c = result.classify || {};
   const d = result.dedup || {};
@@ -353,6 +363,8 @@ function formatProcessSummary(result) {
 
   if (r.created) {
     lines.push(`Ranking: created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup`);
+  } else if (r.updated) {
+    lines.push(`Ranking: ${formatRankUpdate(r)}`);
   } else {
     lines.push(`Ranking: no new episode (${escapeHtml(r.reason || "unknown")}, episode #${r.episode_id ?? "?"})`);
   }
@@ -384,7 +396,7 @@ function wireProcessButton() {
     const stopLoading = () => {
       clearInterval(timerInterval);
       btn.disabled = false;
-      btn.textContent = "Process Episode";
+      btn.textContent = "Process / Update Episode (all steps)";
     };
 
     let queued;
@@ -550,7 +562,7 @@ async function renderEpisodeList() {
       <div class="panel collect-panel">
         <div class="collect-row">
           <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
-          <button class="btn" id="process-btn" type="button">Process Episode (all steps)</button>
+          <button class="btn" id="process-btn" type="button">Process / Update Episode (all steps)</button>
         </div>
         <p id="collect-result" class="collect-result"></p>
         <p id="process-result" class="collect-result"></p>
@@ -561,7 +573,7 @@ async function renderEpisodeList() {
           <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
           <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
           <button class="btn btn-small" id="verify-btn" type="button">4. Verify</button>
-          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select</button>
+          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select / Update</button>
         </div>
         <p id="classify-result" class="collect-result"></p>
         <p id="dedup-stage-result" class="collect-result"></p>
@@ -604,7 +616,9 @@ async function renderEpisodeList() {
       btnId: "rank-btn", resultId: "rank-result", path: "/processing/rank",
       formatResult: (r) => r.created
         ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
-        : `No new episode (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
+        : r.updated
+          ? `${formatRankUpdate(r)}`
+          : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
       onSuccess: () => renderEpisodeList(),
     });
     wireStageButton({

@@ -13,6 +13,7 @@ from app.filters.content_similarity import (
     get_comparable_text,
 )
 from app.models import EpisodeStory, NewsItem, StoryState
+from app.tasks.dedup import pinned_story_ids
 from app.worker.celery_app import celery_app
 
 
@@ -114,6 +115,12 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
 
     candidates = candidates_query.order_by(NewsItem.published_at.asc()).all()
 
+    # Stories already in this date's episode (backups; primaries are
+    # excluded above) go first and are never marked duplicates -- the
+    # first run's selection sticks until approval.
+    pinned = pinned_story_ids(db, target_date)
+    candidates = [c for c in candidates if c[0].id in pinned] + [c for c in candidates if c[0].id not in pinned]
+
     # -------------------------------------------------
     # Step 1: fetch full article text for anything not already
     # attempted (content_fetch_status IS NULL -- a prior failure still
@@ -164,6 +171,10 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
 
         for local_pos, story_idx in enumerate(comparable_indices):
             item, state = remaining[story_idx]
+
+            if item.id in pinned:
+                canonical_pool_positions.append(local_pos)
+                continue
 
             best_score = 0.0
             best_match_item = None
