@@ -17,6 +17,13 @@
 PRIMARY_SOURCE_CREDIBILITY_THRESHOLD = 0.85
 
 
+def count_independent_outlets(source_name: str, duplicate_source_names: list[str]) -> int:
+    """How many distinct OTHER outlets carry the story. A second item from the same publisher
+    (a video companion, a follow-up post) is the same source repeating itself, not confirmation."""
+    own = (source_name or "").strip().lower()
+    return len({(n or "").strip().lower() for n in duplicate_source_names} - {own, ""})
+
+
 def verify_story(
     source_name: str,
     credibility_score: float,
