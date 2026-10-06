@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func, or_
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -8,7 +8,7 @@ from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.dedup.relations import effective_duplicate_story_ids
 from app.models import Episode, EpisodeStory, NewsItem, StoryState
-from app.ranking.engine import ai_relevance_input, compute_total_score
+from app.ranking.engine import EventMember, ai_relevance_input, score_event
 from app.worker.celery_app import celery_app
 
 
@@ -170,17 +170,41 @@ def _score_and_select_top_stories(
     )
 
     # -------------------------------------------------
-    # Duplicate counts per canonical story, computed in one query
-    # rather than N+1 queries per story.
+    # Event clusters: every story linked to an eligible canonical, fetched in one query. A
+    # development is scored as its best viable member (see score_event), so a canonical that
+    # lost the cutoff cannot make the whole development vanish while a duplicate would have made it.
     # -------------------------------------------------
 
-    dup_count_rows = (
-        db.query(StoryState.canonical_story_id, func.count(StoryState.id))
-        .filter(StoryState.canonical_story_id.isnot(None))
-        .group_by(StoryState.canonical_story_id)
-        .all()
-    )
-    dup_counts: dict[int, int] = dict(dup_count_rows)
+    members_of: dict[int, list[EventMember]] = {}
+    canonical_ids = [item.id for item, _ in rows]
+    if canonical_ids:
+        for dup_item, dup_state in (
+            db.query(NewsItem, StoryState)
+            .join(StoryState, StoryState.id == NewsItem.id)
+            .filter(StoryState.canonical_story_id.in_(canonical_ids))
+            .order_by(NewsItem.id)
+            .all()
+        ):
+            viable = (
+                dup_state.ai_relevance == "ai_candidate"
+                and dup_state.source_sufficiency != "insufficient"
+                and dup_item.id not in historical_duplicates
+                and dup_item.id not in already_primary_story_ids
+            )
+            members_of.setdefault(dup_state.canonical_story_id, []).append(
+                EventMember(
+                    story_id=dup_item.id,
+                    source_name=dup_item.source_name,
+                    published_at=dup_item.published_at,
+                    ai_relevance=ai_relevance_input(
+                        dup_state.ai_relevance_score,
+                        classifier_version=dup_state.classifier_version,
+                        classifier_disposition=dup_state.classifier_disposition,
+                        review_decision=dup_state.review_decision,
+                    ),
+                    viable=viable,
+                )
+            )
 
     # -------------------------------------------------
     # Score every eligible story.
@@ -189,27 +213,28 @@ def _score_and_select_top_stories(
     scored: list[tuple[NewsItem, StoryState, float, str]] = []
 
     for item, state in rows:
-        duplicate_count = dup_counts.get(item.id, 0)
-
-        score, reason = compute_total_score(
-            published_at=item.published_at,
-            source_name=item.source_name,
-            ai_relevance_score=ai_relevance_input(
-                state.ai_relevance_score,
-                classifier_version=state.classifier_version,
-                classifier_disposition=state.classifier_disposition,
-                review_decision=state.review_decision,
+        event = score_event(
+            EventMember(
+                story_id=item.id,
+                source_name=item.source_name,
+                published_at=item.published_at,
+                ai_relevance=ai_relevance_input(
+                    state.ai_relevance_score,
+                    classifier_version=state.classifier_version,
+                    classifier_disposition=state.classifier_disposition,
+                    review_decision=state.review_decision,
+                ),
+                verification_status=state.verification_status,
             ),
-            duplicate_count=duplicate_count,
-            now=now,
-            window_hours=settings.news_window_hours,
-            verification_status=state.verification_status,
+            members_of.get(item.id, []),
+            now,
+            settings.news_window_hours,
         )
+        scored.append((item, state, event.total, event.reason))
 
-        scored.append((item, state, score, reason))
-
-    # Highest score first.
-    scored.sort(key=lambda entry: entry[2], reverse=True)
+    # Highest score first; equal scores (to 9 places) fall back to the lowest story id so the
+    # order never depends on database row order.
+    scored.sort(key=lambda entry: (-round(entry[2], 9), entry[0].id))
 
     # -------------------------------------------------
     # Take the Top 30 (or fewer, if not enough eligible stories
@@ -303,11 +328,22 @@ def _update_draft_episode(db, episode: Episode, now: datetime) -> dict:
         _score_and_select_top_stories(db, now, episode.episode_date)
     )
 
+    # A canonical whose duplicate the episode already holds is the same development.
+    held_events = {
+        row[0] for row in
+        db.query(StoryState.canonical_story_id)
+        .filter(StoryState.id.in_(kept_ids), StoryState.canonical_story_id.isnot(None))
+        .all()
+    } if kept_ids else set()
+
     candidates = []
     skipped_repeats = 0
     for entry in scored:
         item, state = entry[0], entry[1]
         if item.id in kept_ids:
+            continue
+        if item.id in held_events:
+            skipped_repeats += 1
             continue
         if state.repeats_story_id is not None and state.repeats_story_id in kept_ids:
             skipped_repeats += 1
