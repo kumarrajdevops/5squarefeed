@@ -186,9 +186,16 @@ class StoryState(Base):
     )
     repeat_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # NULL = never attempted. "success" | "empty_extraction" |
+    # NULL = never attempted. "success" | "partial" | "empty_extraction" |
     # "fetch_error" | "non_html". See app/content/article_extractor.py.
     content_fetch_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Which extractor produced raw_content ("trafilatura_precision" / "trafilatura_recall" /
+    # "json_ld" / "partial"), its word count, and whether it carries enough real
+    # information to brief (app/content/briefing/sufficiency.py). NULL = not assessed.
+    content_extraction_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    source_word_count: Mapped[int | None] = mapped_column(nullable=True)
+    source_sufficiency: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    sufficiency_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Fact Extraction + Verification Engine + taxonomy -- soft signals,
     # never gate ranking eligibility.
@@ -348,6 +355,13 @@ class StoryContent(Base):
     # Human override of the source/quote line under the video's visual window;
     # NULL = automatic (see scene_renderer._support_text).
     support_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Set when the script was generated (NULL for human-written/older scripts).
+    script_word_count: Mapped[int | None] = mapped_column(nullable=True)
+    script_sentence_count: Mapped[int | None] = mapped_column(nullable=True)
+    script_quality_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    script_generation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    script_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     audio_duration_seconds: Mapped[float | None] = mapped_column(nullable=True)

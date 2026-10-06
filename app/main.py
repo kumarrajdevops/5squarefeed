@@ -1249,6 +1249,15 @@ def _serialize_episode(db, episode: Episode) -> dict:
             "summary": content.summary if content else None,
             "script_text": content.script_text if content else None,
             "support_text": content.support_text if content else None,
+            # Source sufficiency + script grade (app/content/briefing); labels only.
+            "source_sufficiency": state.source_sufficiency,
+            "sufficiency_detail": json.loads(state.sufficiency_detail) if state.sufficiency_detail else None,
+            "content_extraction_method": state.content_extraction_method,
+            "source_word_count": state.source_word_count,
+            "script_word_count": content.script_word_count if content else None,
+            "script_quality_status": content.script_quality_status if content else None,
+            "script_generation_reason": content.script_generation_reason if content else None,
+            "content_error": content.error_message if content else None,
             "audio_duration_seconds": content.audio_duration_seconds if content else None,
             # video_path is a fixed per-story URL that gets overwritten
             # in place on every regeneration (edit -> reset -> re-Produce)
@@ -1459,6 +1468,13 @@ def update_story_content(story_id: int, body: StoryContentUpdate):
             content.summary = body.summary
         if body.script_text is not None:
             content.script_text = body.script_text
+            # A human wrote this text: the generated-script grade no longer applies.
+            from app.content.support_facts import split_sentences
+
+            content.script_word_count = len(body.script_text.split())
+            content.script_sentence_count = len(split_sentences(body.script_text))
+            content.script_quality_status = "edited"
+            content.script_generation_reason = "edited by a human"
         if body.support_text is not None:
             content.support_text = body.support_text.strip() or None
 

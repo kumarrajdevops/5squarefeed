@@ -1,5 +1,21 @@
 const API = "/api/v1";
 
+function scriptQualityBadge(s) {
+  // Only surfaces what needs a look: an insufficient/thin source or a script graded review/fail.
+  let label = null, cls = "warn";
+  const detail = (s.sufficiency_detail && s.sufficiency_detail.reason) || s.script_generation_reason || "";
+  if (s.source_sufficiency === "insufficient" || s.script_quality_status === "fail") {
+    label = "insufficient source"; cls = "fail";
+  } else if (s.script_quality_status === "review") {
+    label = "script: review";
+  } else if (s.source_sufficiency === "thin") {
+    label = "thin source";
+  }
+  if (!label) return "";
+  const words = s.script_word_count ? ` (${s.script_word_count} words)` : "";
+  return `<span class="pill ${cls}" title="${escapeAttr(detail + words)}">${label}</span>`;
+}
+
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str == null ? "" : str;
@@ -985,6 +1001,7 @@ function renderStoryList(listId, stories, ep, jumpable) {
         ${s.repeats_story_id
           ? `<span class="pill repeat-flagged" title="${escapeAttr(s.repeat_reason || "")}">possible repeat</span>`
           : ""}
+        ${scriptQualityBadge(s)}
       </div>
     </li>
   `).join("");

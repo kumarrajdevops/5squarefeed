@@ -28,16 +28,24 @@ def test_none_passes_through():
     assert clean_text(None) is None
 
 
+_LONG = (
+    "The company behind it said the change reaches 1,200 customers on March 3, 2026. "
+    "Early tests at Nova Labs showed costs falling by 40 percent, according to the lab. "
+    "Engineers expect a wider rollout across Europe and Asia in April. "
+)
+
+
 def test_generate_script_cleans_headline_and_script():
-    out = generate_script("Here&#8217;s what leaders say", "<p>It doesn&#8217;t stop.</p>")
+    out = generate_script("Here&#8217;s what leaders say", "<p>It doesn&#8217;t stop, they say.</p> " + _LONG)
     assert out["headline"] == "Here’s what leaders say"
     assert "&#" not in out["script_text"]
-    assert "doesn’t" in out["script_text"]
+    assert out["script_text"].startswith("Here’s what leaders say.")
 
 
 def test_generate_script_repairs_mojibake_summary():
-    garbled = "It doesn’t stop.".encode("utf-8").decode("cp1252")
+    garbled = ("Nova Labs said the rollout doesn’t stop at 5,000 customers on March 3, 2026. " + _LONG).encode("utf-8").decode("cp1252")
     out = generate_script("Headline", garbled)
+    assert "â€™" not in out["script_text"]
     assert "doesn’t" in out["script_text"]
 
 

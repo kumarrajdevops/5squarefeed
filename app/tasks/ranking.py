@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -146,6 +146,9 @@ def _score_and_select_top_stories(
             NewsItem.collection_date == episode_date,
             StoryState.ai_relevance == "ai_candidate",
             StoryState.canonical_story_id.is_(None),
+            # Stories whose source cannot support a briefing (app/content/briefing)
+            # are never selected; NULL (not assessed) stays eligible.
+            or_(StoryState.source_sufficiency.is_(None), StoryState.source_sufficiency != "insufficient"),
         )
     )
 

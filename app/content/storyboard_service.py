@@ -19,6 +19,8 @@ whenever a storyboard is missing or stale -- not a separate rendering
 path, and no longer called directly by any DEV endpoint.
 """
 import json
+import os
+import time
 from datetime import datetime, timezone
 
 from app.content.storyboard_composer import compose_storyboard_video
@@ -129,7 +131,10 @@ def mark_storyboard_current(story_id: int) -> None:
     Only call it when the storyboard was already valid before the write."""
     storyboard_path = MEDIA_ROOT / "storyboard" / str(story_id) / "storyboard.json"
     if storyboard_path.exists():
-        storyboard_path.touch()
+        # touch() takes a coarse kernel timestamp that can sit a few ms behind the
+        # Python-clock updated_at it is compared against; stamp from time.time().
+        now = time.time()
+        os.utime(storyboard_path, (now, now))
 
 
 def ensure_storyboard(db, story_id: int) -> dict:

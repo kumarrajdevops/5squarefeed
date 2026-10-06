@@ -21,7 +21,14 @@ def _insert_raw_item(db, title, url, source_name="Test Source"):
         published_at=published_at,
         collected_at=datetime.now(timezone.utc),
         collection_date=TARGET_DATE,
-        raw_summary=f"{title} -- a real update from {source_name}.",
+        # Rich enough to pass the briefing sufficiency gate (app/content/briefing):
+        # stories whose only source is a one-line teaser are excluded at ranking.
+        raw_summary=(
+            f"{title} -- a real update from {source_name}. "
+            f"The company behind {title.split()[0]} said the change reaches 1,200 customers on March 3, 2026. "
+            f"Engineers at Nova Labs reported the {title.split()[-1]} work cutting costs by 40 percent, according to {source_name}. "
+            f"Engineers expect a wider rollout across Europe and Asia in April."
+        ),
         status="collected",
     )
     db.add(item)
