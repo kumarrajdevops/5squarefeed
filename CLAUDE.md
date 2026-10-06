@@ -220,7 +220,7 @@ Don't re-diagnose from scratch.
   `docker compose exec -T worker python -c "import fastembed"`. The model
   caches in `media/.model_cache` (gitignored); first load takes ~28 s.
 - Dedup/classification verdict tables are versioned (`method_version`
-  `semantic-v1`, `RULES_VERSION` `rules-v1`). After changing a threshold or
+  `semantic-v1`, `RULES_VERSION` `rules-v2`). After changing a threshold or
   pattern, bump the version and re-run `python -m app.scripts.dedup_replay`
   (read-only) before trusting the change; never edit rows in
   `editorial.historical_story_relations` by hand -- set `editor_override`.

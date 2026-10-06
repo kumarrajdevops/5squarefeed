@@ -21,6 +21,11 @@ from app.filters.classification_rules import (
     "Google DeepMind unveils new robotics model",
     "Meta adds AI summaries to Instagram",
     "EU bans AI-generated political ads",
+    "Anthropic is giving startups a free year of Claude Team",
+    "Reflection debuts Beam, an open-weight AI model",
+    "NetApp aims to make legacy data AI-ready",
+    "Google is about to remove free access to Gemini Flash",
+    "California subpoenas OpenAI over rogue AI agents",
 ])
 def test_ai_title_with_development_verb_is_candidate(title):
     r = classify(title, "Some summary text.")
@@ -32,6 +37,16 @@ def test_ai_title_with_development_verb_is_candidate(title):
 def test_candidate_reason_is_explainable():
     r = classify("OpenAI launches GPT update", "")
     assert "title" in r.reason and "development verb" in r.reason
+
+
+@pytest.mark.parametrize("title", [
+    "Sam Altman says AI is totally worth it",
+    "Amazon warns local communities about its AI data centers",
+    "Most Americans want AI development to slow down",
+])
+def test_statement_verbs_stay_in_review_not_candidate(title):
+    # says/warns/wants report opinion; measured to add false candidates, so deliberately excluded
+    assert classify(title, "").disposition != CANDIDATE
 
 
 # ---------------------------------------------------------------- review
@@ -133,7 +148,7 @@ def test_keyword_set_from_existing_classifier_is_used():
 # ---------------------------------------------------------------- result shape / robustness
 def test_result_carries_version_and_is_immutable():
     r = classify("OpenAI launches a model", "")
-    assert r.version == RULES_VERSION == "rules-v1"
+    assert r.version == RULES_VERSION == "rules-v2"
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.disposition = REJECT
 

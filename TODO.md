@@ -2985,3 +2985,10 @@ whenever it does.
       `app/dates.episode_made_date(created_at)`, same source as the intro. Already-uploaded videos
       (Ep 6 and 7, dev and prod) keep the old title/description -- the upload-only OAuth scope can't edit
       them; change in YouTube Studio. Test: `tests/test_multi_environment_publish.py`.
+
+### This session -- 2026-10-07, part 55 (classifier verbs, `rules-v2`)
+
+- [x] **Verb list extended.** `DEV_RE` gained event verbs seen in real headlines that `rules-v1` sent to review (giving, aims, debuts, delivers, earmarks, publishes, pitches, tackles, removes, proposes, confirms, quits, changes, hits, faces, subpoenas, charges, offers, runs, building, holds, handles, sticking, watermark, ...). `RULES_VERSION` is now `rules-v2`.
+- [x] **Measured, not assumed.** On the 357 hand-labelled items (not blind), candidate recall went 0.409 -> 0.602 and precision 0.818 -> 0.869, with no new false candidates (the same 8 as before). Statement verbs (says, warns, wants, plans) and `makes` were tried and deliberately left out: they added false candidates or opinion pieces (e.g. "Sam Altman says ...").
+- [x] **Re-evaluated 2026-10-06.** 16 of 97 undecided `ai_review` stories became `ai_candidate` (stamped `rules-v2`, reason suffixed "(re-evaluated)"); the other 81, `not_ai` and `rules-v1` candidates were untouched. Downstream stages and draft episode 13 were NOT re-run.
+- [ ] Known remaining gap: most labelled-candidate misses have no AI term in the title (Nvidia chips, "Super Intelligence Force"), so verbs cannot fix them.

@@ -1,7 +1,7 @@
-"""Deterministic, LLM-free classification gate ("rules-v1").
+"""Deterministic, LLM-free classification gate ("rules-v2").
 
 Decides whether a story enters the candidate pool, needs an editor's look, or is
-rejected. It is NOT wired into the pipeline yet: nothing imports it except tests.
+rejected. Wired in via app/tasks/classify.py (the first processing stage).
 
 Disposition:
     candidate  AI term in the title plus a development verb, no non-news pattern
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from app.filters.ai_relevance import AI_KEYWORDS
 
-RULES_VERSION = "rules-v1"
+RULES_VERSION = "rules-v2"
 
 CANDIDATE = "candidate"
 REVIEW = "review"
@@ -67,7 +67,12 @@ DEV_RE = re.compile(
     r"freez(es|ing)|froze|open[- ]sources?|ships?|rolls? out|raises?|acquires?|hires?|reports?|finds?|found|"
     r"sues?|arrest(ed|s)?|limit(s|ing)|halts?|cracks?|solves?|discovers?|detects?|tracking|tracks|"
     r"cuts?|kills?|blocks?|resigns?|rules?|ruled|testing|tests|new|beats?|outperforms?|"
-    r"flagged|expands?|partners?|signs?|deploys?|deployed)\b", re.I)
+    r"flagged|expands?|partners?|signs?|deploys?|deployed|"
+    # rules-v2: event verbs seen in real headlines that v1 sent to review
+    r"giv(es|ing)|gave|aims?|debuts?|delivers?|earmarks?|publishes|pitche[sd]|tackles?|removes?|"
+    r"proposes?|confirms?|bets|lets|wins|loses|drops|pushes|quits?|changes|changed|hits|faces|"
+    r"subpoenas?|subpoenaed|charges|charged|offers|runs|(re)?building|losing|holds|handles|"
+    r"stick(s|ing)|watermark(s|ing)?)\b", re.I)
 
 
 def _terms_re(terms) -> re.Pattern:

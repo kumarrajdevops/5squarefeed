@@ -20,7 +20,7 @@ explainable, nothing that can hallucinate or vary run to run:
 | Stage | How it works | AI/LLM involved? |
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
-| Classification (AI relevance) | Deterministic rules gate (`rules-v1`): non-news patterns reject, an AI term plus a development verb in the title is a candidate, anything uncertain goes to an editor review lane | No |
+| Classification (AI relevance) | Deterministic rules gate (`rules-v2`): non-news patterns reject, an AI term plus a development verb in the title is a candidate, anything uncertain goes to an editor review lane | No |
 | Deduplication | Title string-similarity + time window, plus full-article-text TF-IDF/cosine similarity within the same batch | No |
 | Historical dedup | Local sentence embeddings (`fastembed`, `bge-small-en-v1.5`, ONNX CPU, no vector DB) plus deterministic rules decide whether a story reports a development already published; the same company/product alone is never a duplicate | No LLM (small local embedding model) |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
@@ -788,7 +788,7 @@ failure handling, since delivery is always best-effort.
 
 ## Classification and historical dedup
 
-**Classification** (`app/filters/classification_rules.py`, `rules-v1`, first
+**Classification** (`app/filters/classification_rules.py`, `rules-v2`, first
 processing stage). Each collected story becomes `ai_candidate`, `ai_review`
 or `not_ai`, with the rule's reason stored on the row. `ai_review` stories
 stay out of every pool until an editor promotes or rejects them
