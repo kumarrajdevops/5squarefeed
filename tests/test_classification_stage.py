@@ -1,24 +1,26 @@
 """
-Pipeline integration of the rules classifier (app/tasks/classify.py): the three
-dispositions map to ai_candidate / ai_review / not_ai, the structured result is
-stored on the row, and the migration that adds those columns is consistent with
-the model.
+Pipeline integration of the rules classifier (app/tasks/classify.py): classification is fully
+automated and binary (ai_candidate / not_ai), the structured result is stored on the row, legacy
+ai_review rows are re-evaluated automatically, and the migration that adds the classifier columns
+is consistent with the model.
 """
 import importlib.util
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 
-from app.filters.classification_rules import RULES_VERSION
+from app import main
 from app.filters.ai_relevance import calculate_ai_relevance
+from app.filters.classification_rules import RULES_VERSION
 from app.models import NewsItem, StoryState
-from app.tasks.classify import classify_new_raw_items
+from app.tasks.classify import classify_new_raw_items, reevaluate_legacy_review
 
 DAY = date(2026, 9, 20)
 
 CANDIDATE_TITLE = "OpenAI announces new AI model"
-REVIEW_TITLE = "The future of AI agents in banking"
+NO_DEVELOPMENT_TITLE = "The future of AI agents in banking"
 REJECT_TITLE = "Local bakery wins regional award"
+GIVING_TITLE = "Anthropic is giving startups a free year of Claude Team"
 
 NEW_COLUMNS = [
     "classifier_version",
@@ -51,32 +53,40 @@ def _state(db, item):
     return db.get(StoryState, item.id)
 
 
-def test_dispositions_map_to_existing_and_new_states(db_session):
+def test_dispositions_map_to_binary_states_and_never_to_review(db_session):
     cand = _item(db_session, CANDIDATE_TITLE, "https://e.test/c")
-    rev = _item(db_session, REVIEW_TITLE, "https://e.test/r")
+    nodev = _item(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/r")
     rej = _item(db_session, REJECT_TITLE, "https://e.test/x")
 
     result = classify_new_raw_items(db_session, DAY)
 
-    assert result == {"classified": 3, "ai_candidates": 1, "ai_review": 1}
+    assert result == {
+        "classified": 3,
+        "ai_candidates": 1,
+        "not_ai": 2,
+        "reevaluated_legacy_review": 0,
+        "legacy_to_ai_candidate": 0,
+        "legacy_to_not_ai": 0,
+    }
     assert _state(db_session, cand).ai_relevance == "ai_candidate"
-    assert _state(db_session, rev).ai_relevance == "ai_review"
+    assert _state(db_session, nodev).ai_relevance == "not_ai"
     assert _state(db_session, rej).ai_relevance == "not_ai"
+    assert {s.ai_relevance for s in db_session.query(StoryState).all()} <= {"ai_candidate", "not_ai"}
 
 
 def test_structured_result_version_and_reason_are_recorded(db_session):
     cand = _item(db_session, CANDIDATE_TITLE, "https://e.test/c")
-    rev = _item(db_session, REVIEW_TITLE, "https://e.test/r")
+    nodev = _item(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/r")
     rej = _item(db_session, REJECT_TITLE, "https://e.test/x")
     classify_new_raw_items(db_session, DAY)
 
     for item, disposition, relatedness in [
         (cand, "candidate", "core"),
-        (rev, "review", "core"),
+        (nodev, "reject", "core"),
         (rej, "reject", "none"),
     ]:
         state = _state(db_session, item)
-        assert state.classifier_version == RULES_VERSION
+        assert state.classifier_version == RULES_VERSION == "rules-v3"
         assert state.classifier_disposition == disposition
         assert state.classifier_ai_relatedness == relatedness
         assert state.filter_reason
@@ -84,7 +94,7 @@ def test_structured_result_version_and_reason_are_recorded(db_session):
         assert state.reviewed_at is None
 
     assert _state(db_session, cand).filter_reason.startswith("Candidate:")
-    assert _state(db_session, rev).filter_reason.startswith("Review:")
+    assert _state(db_session, nodev).filter_reason.startswith("Rejected:")
     assert _state(db_session, rej).filter_reason.startswith("Rejected:")
 
 
@@ -97,10 +107,23 @@ def test_content_flag_is_recorded_for_non_news_rejects(db_session):
     assert state.classifier_content_flag == "deal"
 
 
-def test_score_is_the_legacy_keyword_scorer_output_for_every_disposition(db_session):
+def test_real_1006_pattern_is_classified_from_title_and_summary(db_session):
+    # Licence/pay language where the AI context is only in the (HTML) summary.
+    item = _item(
+        db_session,
+        "Qualcomm will pay Huawei to license its patents",
+        "https://e.test/q",
+        summary="<p>The deal covers chips for AI phones.</p>",
+    )
+    classify_new_raw_items(db_session, DAY)
+
+    assert _state(db_session, item).ai_relevance == "ai_candidate"
+
+
+def test_score_is_the_legacy_keyword_scorer_output_for_every_row(db_session):
     items = [
         _item(db_session, CANDIDATE_TITLE, "https://e.test/c"),
-        _item(db_session, REVIEW_TITLE, "https://e.test/r"),
+        _item(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/r"),
         _item(db_session, REJECT_TITLE, "https://e.test/x"),
     ]
     classify_new_raw_items(db_session, DAY)
@@ -122,28 +145,21 @@ def test_candidate_the_legacy_keyword_list_misses_keeps_a_zero_score(db_session)
 
 
 def test_rerun_is_idempotent_and_never_touches_classified_rows(db_session):
-    rev = _item(db_session, REVIEW_TITLE, "https://e.test/r")
+    item = _item(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/r")
     classify_new_raw_items(db_session, DAY)
-
-    # An editor decision made between runs must survive the next run.
-    state = _state(db_session, rev)
-    state.ai_relevance = "ai_candidate"
-    state.review_decision = "promoted"
-    state.reviewed_at = datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc)
-    db_session.commit()
+    before = _state(db_session, item).filter_reason
 
     again = classify_new_raw_items(db_session, DAY)
 
-    assert again == {"classified": 0, "ai_candidates": 0, "ai_review": 0}
-    state = _state(db_session, rev)
-    assert state.ai_relevance == "ai_candidate"
-    assert state.review_decision == "promoted"
+    assert again["classified"] == 0
+    assert again["reevaluated_legacy_review"] == 0
+    assert _state(db_session, item).filter_reason == before
     assert db_session.query(StoryState).count() == 1
 
 
 def test_only_the_target_date_is_classified(db_session):
     _item(db_session, CANDIDATE_TITLE, "https://e.test/c")
-    other = _item(db_session, REVIEW_TITLE, "https://e.test/r")
+    other = _item(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/r")
     other.collection_date = date(2026, 9, 19)
     db_session.commit()
 
@@ -154,13 +170,102 @@ def test_only_the_target_date_is_classified(db_session):
 
 
 def test_legacy_rows_without_a_classifier_result_stay_valid(db_session):
-    # Rows classified before this change have NULL in every new column.
+    # Rows classified before the classifier columns existed have NULL in every one of them.
     item = _item(db_session, "Legacy story", "https://e.test/l")
     db_session.add(StoryState(id=item.id, ai_relevance="ai_candidate", ai_relevance_score=0.8))
     db_session.commit()
 
     state = _state(db_session, item)
     assert all(getattr(state, name) is None for name in NEW_COLUMNS)
+
+
+# --- legacy ai_review rows are re-evaluated automatically ----------------------
+
+
+def _legacy_review(db, title, url, summary=None, version="rules-v2"):
+    item = _item(db, title, url, summary=summary)
+    db.add(
+        StoryState(
+            id=item.id,
+            ai_relevance="ai_review",
+            ai_relevance_score=0.0,
+            filter_reason="Review: AI term in title but no development verb",
+            classifier_version=version,
+            classifier_disposition="review",
+            classifier_ai_relatedness="core",
+        )
+    )
+    db.commit()
+    return item
+
+
+def test_legacy_review_rows_become_candidate_or_not_ai_without_any_human_step(db_session):
+    cand = _legacy_review(db_session, GIVING_TITLE, "https://e.test/1")
+    rej = _legacy_review(db_session, NO_DEVELOPMENT_TITLE, "https://e.test/2")
+
+    result = classify_new_raw_items(db_session, DAY)
+
+    assert result["classified"] == 0
+    assert result["reevaluated_legacy_review"] == 2
+    assert result["legacy_to_ai_candidate"] == 1
+    assert result["legacy_to_not_ai"] == 1
+    for item, relevance, disposition in [(cand, "ai_candidate", "candidate"), (rej, "not_ai", "reject")]:
+        state = _state(db_session, item)
+        assert state.ai_relevance == relevance
+        assert state.classifier_disposition == disposition
+        assert state.classifier_version == RULES_VERSION
+        assert state.filter_reason.startswith("Re-evaluated (was ai_review under rules-v2). ")
+        assert state.review_decision is None
+
+
+def test_legacy_reevaluation_is_idempotent(db_session):
+    _legacy_review(db_session, GIVING_TITLE, "https://e.test/1")
+    classify_new_raw_items(db_session, DAY)
+    reason = db_session.query(StoryState).one().filter_reason
+
+    again = classify_new_raw_items(db_session, DAY)
+
+    assert again["reevaluated_legacy_review"] == 0
+    assert db_session.query(StoryState).one().filter_reason == reason
+
+
+def test_legacy_reevaluation_is_scoped_to_the_date_and_to_ai_review_rows(db_session):
+    other_day = _legacy_review(db_session, GIVING_TITLE, "https://e.test/1")
+    other_day.collection_date = date(2026, 9, 19)
+    settled = _item(db_session, CANDIDATE_TITLE, "https://e.test/2")
+    db_session.add(
+        StoryState(id=settled.id, ai_relevance="not_ai", filter_reason="kept", classifier_version="rules-v1")
+    )
+    db_session.commit()
+
+    result = reevaluate_legacy_review(db_session, DAY)
+
+    assert result["reevaluated"] == 0
+    assert _state(db_session, other_day).ai_relevance == "ai_review"
+    assert _state(db_session, settled).filter_reason == "kept"
+
+
+def test_reevaluation_never_touches_dedup_or_ranking_fields(db_session):
+    item = _legacy_review(db_session, GIVING_TITLE, "https://e.test/1")
+    state = _state(db_session, item)
+    state.canonical_story_id = 999
+    state.ai_relevance_score = 0.33
+    db_session.commit()
+
+    classify_new_raw_items(db_session, DAY)
+
+    state = _state(db_session, item)
+    assert state.canonical_story_id == 999
+    assert state.ai_relevance_score == 0.33
+
+
+def test_review_endpoints_and_review_helpers_are_gone():
+    import app.filters.review as review
+
+    paths = {route.path for route in main.app.routes}
+    assert "/api/v1/review-queue" not in paths
+    assert not any("/stories/" in path and path.endswith("/review") for path in paths)
+    assert not hasattr(review, "apply_review_decision")
 
 
 # --- migration / schema state -------------------------------------------------

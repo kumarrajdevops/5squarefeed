@@ -4,9 +4,45 @@ from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.filters.ai_relevance import calculate_ai_relevance
 from app.filters.classification_rules import classify
-from app.filters.review import AI_CANDIDATE, AI_REVIEW, RELEVANCE_BY_DISPOSITION
+from app.filters.review import AI_CANDIDATE, AI_REVIEW, NOT_AI, RELEVANCE_BY_DISPOSITION
 from app.models import NewsItem, StoryState
 from app.worker.celery_app import celery_app
+
+
+def _apply_verdict(state: StoryState, verdict, *, reason_prefix: str = "") -> str:
+    state.ai_relevance = RELEVANCE_BY_DISPOSITION[verdict.disposition]
+    state.filter_reason = reason_prefix + verdict.reason
+    state.classifier_version = verdict.version
+    state.classifier_disposition = verdict.disposition
+    state.classifier_ai_relatedness = verdict.ai_relatedness
+    state.classifier_content_flag = verdict.content_flag
+    return state.ai_relevance
+
+
+def reevaluate_legacy_review(db, target_date) -> dict:
+    """
+    Automatically re-evaluate stories an earlier rules version parked as ai_review.
+
+    There is no promote/reject step: each such row is classified again from its title and
+    summary with the current rules and becomes ai_candidate or not_ai. The previous state is
+    kept in filter_reason ("was ai_review under rules-v2"). Only rows still in the legacy
+    state are touched, so this is idempotent and a no-op on any database without them.
+    """
+    rows = (
+        db.query(StoryState, NewsItem)
+        .join(NewsItem, NewsItem.id == StoryState.id)
+        .filter(NewsItem.collection_date == target_date, StoryState.ai_relevance == AI_REVIEW)
+        .all()
+    )
+    to_candidate = to_not_ai = 0
+    for state, item in rows:
+        prefix = f"Re-evaluated (was ai_review under {state.classifier_version or 'earlier rules'}). "
+        verdict = classify(title=item.title, summary=item.raw_summary)
+        if _apply_verdict(state, verdict, reason_prefix=prefix) == AI_CANDIDATE:
+            to_candidate += 1
+        else:
+            to_not_ai += 1
+    return {"reevaluated": len(rows), "to_ai_candidate": to_candidate, "to_not_ai": to_not_ai}
 
 
 def classify_new_raw_items(db, target_date) -> dict:
@@ -19,14 +55,16 @@ def classify_new_raw_items(db, target_date) -> dict:
     computes anything editorial (see app/models.py's NewsItem vs
     StoryState split).
 
-    The decision comes from app/filters/classification_rules.py:
-    candidate -> ai_candidate, review -> ai_review (held out of every
-    pool until an editor promotes it), reject -> not_ai. The structured
-    result (rules version, disposition, reason) is stored on the row.
+    The decision comes from app/filters/classification_rules.py and is
+    fully automated and binary: candidate -> ai_candidate, reject ->
+    not_ai. Nothing here produces or waits on a human decision; leftover
+    legacy ai_review rows for the date are re-evaluated automatically
+    (reevaluate_legacy_review). The structured result (rules version,
+    disposition, reason) is stored on the row.
 
     Idempotent: only touches raw.news_items rows that don't already
-    have a StoryState row, so calling this again for a target_date
-    already processed does nothing.
+    have a StoryState row (plus any leftover legacy ai_review rows), so
+    calling this again for a target_date already processed does nothing.
     """
 
     already_classified_ids = {row[0] for row in db.query(StoryState.id).all()}
@@ -39,7 +77,7 @@ def classify_new_raw_items(db, target_date) -> dict:
 
     classified = 0
     ai_candidates = 0
-    ai_review = 0
+    not_ai = 0
 
     for item in unclassified:
         verdict = classify(title=item.title, summary=item.raw_summary)
@@ -64,12 +102,20 @@ def classify_new_raw_items(db, target_date) -> dict:
         classified += 1
         if ai_relevance == AI_CANDIDATE:
             ai_candidates += 1
-        elif ai_relevance == AI_REVIEW:
-            ai_review += 1
+        elif ai_relevance == NOT_AI:
+            not_ai += 1
 
+    legacy = reevaluate_legacy_review(db, target_date)
     db.commit()
 
-    result = {"classified": classified, "ai_candidates": ai_candidates, "ai_review": ai_review}
+    result = {
+        "classified": classified,
+        "ai_candidates": ai_candidates,
+        "not_ai": not_ai,
+        "reevaluated_legacy_review": legacy["reevaluated"],
+        "legacy_to_ai_candidate": legacy["to_ai_candidate"],
+        "legacy_to_not_ai": legacy["to_not_ai"],
+    }
     print(f"[classify] Completed: {result}")
     return result
 

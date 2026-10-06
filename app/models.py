@@ -171,13 +171,13 @@ class StoryState(Base):
 
     # Structured result of the classification gate (app/filters/classification_rules.py).
     # NULL on rows classified before the gate existed. ai_relevance is the live state
-    # ("ai_candidate" | "ai_review" | "not_ai"); classifier_disposition is what the
-    # classifier itself said, so an editor override stays distinguishable from it.
+    # ("ai_candidate" | "not_ai"; "ai_review" survives only in rows written by rules-v1/v2 and is
+    # re-evaluated automatically); classifier_disposition is what the classifier itself said.
     classifier_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     classifier_disposition: Mapped[str | None] = mapped_column(String(20), nullable=True)
     classifier_ai_relatedness: Mapped[str | None] = mapped_column(String(10), nullable=True)
     classifier_content_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    # Editor override of an "ai_review" story: "promoted" | "rejected".
+    # Legacy (rules-v1/v2 review lane): "promoted" | "rejected". Nothing writes these any more.
     review_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

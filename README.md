@@ -20,7 +20,7 @@ explainable, nothing that can hallucinate or vary run to run:
 | Stage | How it works | AI/LLM involved? |
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
-| Classification (AI relevance) | Deterministic rules gate (`rules-v2`): non-news patterns reject, an AI term plus a development verb in the title is a candidate, anything uncertain goes to an editor review lane | No |
+| Classification (AI relevance) | Deterministic, fully automated, binary rules gate (`rules-v3`): `ai_candidate` or `not_ai`. Non-news patterns reject; an AI term plus a concrete development is a candidate | No |
 | Deduplication | Title string-similarity + time window, plus full-article-text TF-IDF/cosine similarity within the same batch | No |
 | Historical dedup | Local sentence embeddings (`fastembed`, `bge-small-en-v1.5`, ONNX CPU, no vector DB) plus deterministic rules decide whether a story reports a development already published; the same company/product alone is never a duplicate | No LLM (small local embedding model) |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
@@ -788,13 +788,21 @@ failure handling, since delivery is always best-effort.
 
 ## Classification and historical dedup
 
-**Classification** (`app/filters/classification_rules.py`, `rules-v2`, first
-processing stage). Each collected story becomes `ai_candidate`, `ai_review`
-or `not_ai`, with the rule's reason stored on the row. `ai_review` stories
-stay out of every pool until an editor promotes or rejects them
-(`GET /api/v1/review-queue`, `POST /api/v1/stories/{id}/review`, and the
-dashboard review lane). Changing a pattern requires bumping `RULES_VERSION`.
-Evaluation data lives in `eval/classification/`.
+**Classification** (`app/filters/classification_rules.py`, `rules-v3`, first
+processing stage). Fully automated and binary: each collected story becomes
+`ai_candidate` or `not_ai`, with the rule's reason stored on the row. The
+question it answers is "is this relevant AI news worth considering for the
+candidate pool?"; ranking decides the line-up and a human approves the episode
+after it is generated, not during classification. There is no review lane:
+the `ai_review` value is legacy (old rows only); the classify stage
+re-evaluates any leftover `ai_review` row from its title and summary into
+`ai_candidate` or `not_ai`. Development verbs are detected generically (verb
+stems with inflections, "will/to + verb", intent constructions, figures,
+versioned products, reported statements) rather than from a fixed list.
+Changing a pattern requires bumping `RULES_VERSION`. Evaluation data lives in
+`eval/classification/`; the read-only before/after replay is
+`python -m app.scripts.classification_replay --start-date YYYY-MM-DD`
+(writes `media/reports/classification_replay_*`).
 
 **Historical dedup** (`app/dedup/`, `app/tasks/historical_dedup.py`,
 `semantic-v1`, runs after same-day content dedup). A story is a duplicate

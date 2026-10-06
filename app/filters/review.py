@@ -1,48 +1,17 @@
-"""Mapping from the classification gate to pipeline state, and the editor's review decision.
+"""Mapping from the classification gate to pipeline state.
 
-Review stories carry ai_relevance="ai_review". Every pool filter downstream (dedup, content-dedup,
-verification, ranking, video QA, the stories API) selects on ai_relevance == "ai_candidate", so a
-review story stays out of all of them until an editor promotes it.
+Classification is fully automated and binary: candidate -> ai_candidate, reject -> not_ai.
+There is no human step in classification; editorial approval happens after the episode exists.
+
+AI_REVIEW is a legacy value. Rules-v1/v2 parked uncertain stories as ai_review; those rows may
+still exist in old data, but nothing produces the value any more and nothing waits on it. The
+classification stage re-evaluates any leftover ai_review row with the current rules
+(app/tasks/classify.py: reevaluate_legacy_review).
 """
-from datetime import datetime, timezone
-
-from app.filters.classification_rules import CANDIDATE, REJECT, REVIEW
+from app.filters.classification_rules import CANDIDATE, REJECT
 
 AI_CANDIDATE = "ai_candidate"
-AI_REVIEW = "ai_review"
 NOT_AI = "not_ai"
+AI_REVIEW = "ai_review"  # legacy, read-only: never assigned to a new classification
 
-RELEVANCE_BY_DISPOSITION = {CANDIDATE: AI_CANDIDATE, REVIEW: AI_REVIEW, REJECT: NOT_AI}
-
-PROMOTE = "promote"
-REJECT_DECISION = "reject"
-
-
-class ReviewError(Exception):
-    def __init__(self, message: str, status_code: int):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-def apply_review_decision(db, story_id: int, decision: str, now: datetime | None = None):
-    """Promote an ai_review story to ai_candidate, or reject it to not_ai, and record the override."""
-    from app.models import StoryState
-
-    if decision not in (PROMOTE, REJECT_DECISION):
-        raise ReviewError(f"Unknown decision {decision!r}; expected 'promote' or 'reject'.", 422)
-
-    state = db.get(StoryState, story_id)
-    if state is None:
-        raise ReviewError(f"Story {story_id} not found.", 404)
-    if state.ai_relevance != AI_REVIEW:
-        raise ReviewError(f"Story {story_id} is not awaiting review (state: {state.ai_relevance}).", 409)
-
-    if decision == PROMOTE:
-        state.ai_relevance = AI_CANDIDATE
-        state.review_decision = "promoted"
-    else:
-        state.ai_relevance = NOT_AI
-        state.review_decision = "rejected"
-    state.reviewed_at = now or datetime.now(timezone.utc)
-    db.commit()
-    return state
+RELEVANCE_BY_DISPOSITION = {CANDIDATE: AI_CANDIDATE, REJECT: NOT_AI}
