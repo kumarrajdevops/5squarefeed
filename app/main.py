@@ -13,8 +13,19 @@ from sqlalchemy import select, text
 from app.config import settings
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
+from app.dedup.decision import METHOD_VERSION as DEDUP_METHOD_VERSION
 from app.filters.review import AI_REVIEW, ReviewError, apply_review_decision
-from app.models import CollectionRun, Episode, EpisodePublication, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.models import (
+    CollectionRun,
+    Episode,
+    EpisodePublication,
+    EpisodeStory,
+    HistoricalStoryRelation,
+    NewsItem,
+    Notification,
+    StoryContent,
+    StoryState,
+)
 from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
@@ -25,6 +36,7 @@ from app.tasks.episode_qa import run_episode_qa
 from app.tasks.episode_storyboard import read_report as read_storyboard_report
 from app.tasks.episode_storyboard import run_episode_storyboards, start_report as start_storyboard_report
 from app.tasks.episode_video import produce_episode_video
+from app.tasks.historical_dedup import run_historical_dedup
 from app.tasks.publishing import publish_episode_to_youtube
 from app.tasks.ranking import (
     REPROCESSABLE_STATUSES,
@@ -323,7 +335,7 @@ def trigger_dedup(target_date: str | None = None):
 @app.post("/api/v1/processing/content-dedup")
 def trigger_content_dedup(target_date: str | None = None):
     """
-    Full-article-text content dedup + historical-repeat detection over
+    Full-article-text fetch + same-day content dedup over
     target_date's remaining canonical stories -- see
     app/tasks/content_dedup.py::enrich_and_dedup_by_content. Fetches
     real article pages for stories not already attempted; can take a
@@ -333,6 +345,23 @@ def trigger_content_dedup(target_date: str | None = None):
     _validate_date_param(target_date, "target_date")
 
     task = run_enrich_and_dedup_by_content.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/historical-dedup")
+def trigger_historical_dedup(target_date: str | None = None):
+    """
+    Semantic duplicate check of target_date's remaining canonical AI
+    candidates against already-published stories -- see
+    app/tasks/historical_dedup.py::deduplicate_against_history. Run it
+    after Content-Dedup so the article text is available. Idempotent:
+    already-decided stories are skipped; verdicts land in
+    editorial.historical_story_relations.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_historical_dedup.delay(target_date_iso=target_date)
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -1135,6 +1164,8 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
     awaiting_review = sum(1 for s in story_states if s.ai_relevance == AI_REVIEW)
     dup_count = sum(1 for s in story_states if s.canonical_story_id is not None)
     repeat_count = sum(1 for s in story_states if s.repeats_story_id is not None)
+    historical = _historical_relations(db, [s.id for s in story_states])
+    historical_duplicates = sum(1 for r in historical.values() if r["decision"] == "duplicate")
     fetched_count = sum(1 for s in story_states if s.content_fetch_status is not None)
     verified_count = sum(1 for s in story_states if s.verification_status == "verified")
     unverified_count = sum(1 for s in story_states if s.verification_status == "unverified")
@@ -1185,8 +1216,16 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {
             "stage": "content_dedup", "label": "Content-Dedup", "status": processed_status,
             "detail": (
-                f"{fetched_count} article(s) fetched, {repeat_count} historical repeat(s)"
+                f"{fetched_count} article(s) fetched"
                 if classified else "not yet run"
+            ),
+        },
+        {
+            "stage": "historical_dedup", "label": "Historical-Dedup",
+            "status": "done" if historical else "pending",
+            "detail": (
+                f"{historical_duplicates} repeat(s) held back, {len(historical) - historical_duplicates} new development(s) of covered ground"
+                if historical else "not run for this date"
             ),
         },
         {
@@ -1202,6 +1241,62 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {"stage": "approve", "label": "Approve", "status": approve_status, "detail": approve_detail},
         {"stage": "publish", "label": "Publish", "status": publish_status, "detail": publish_detail},
     ]
+
+
+def _historical_relations(db, story_ids) -> dict:
+    """
+    Historical-dedup verdict per story (current method_version): the duplicate
+    verdict if there is one, else the closest related one, with the matched
+    story's title and the date of the episode that first published it.
+    """
+    ids = list(story_ids)
+    if not ids:
+        return {}
+    rows = (
+        db.query(HistoricalStoryRelation)
+        .filter(
+            HistoricalStoryRelation.method_version == DEDUP_METHOD_VERSION,
+            HistoricalStoryRelation.story_id.in_(ids),
+        )
+        .all()
+    )
+    best: dict[int, HistoricalStoryRelation] = {}
+    for row in rows:
+        current = best.get(row.story_id)
+        key = (row.decision == "duplicate", row.semantic_similarity)
+        if current is None or key > (current.decision == "duplicate", current.semantic_similarity):
+            best[row.story_id] = row
+    matched_ids = {row.matched_story_id for row in best.values()}
+    titles = dict(db.query(NewsItem.id, NewsItem.title).filter(NewsItem.id.in_(matched_ids)).all()) if matched_ids else {}
+    published = {}
+    if matched_ids:
+        for story_id, episode_date in (
+            db.query(EpisodeStory.story_id, Episode.episode_date)
+            .join(Episode, Episode.id == EpisodeStory.episode_id)
+            .filter(EpisodeStory.selection_status == "primary", EpisodeStory.story_id.in_(matched_ids))
+            .order_by(Episode.episode_date.desc())
+            .all()
+        ):
+            published[story_id] = episode_date  # ends on the earliest date
+    return {
+        story_id: {
+            "decision": row.editor_override or row.decision,
+            "detector_decision": row.decision,
+            "editor_override": row.editor_override,
+            "matched_story_id": row.matched_story_id,
+            "matched_title": titles.get(row.matched_story_id),
+            "matched_episode_date": published.get(row.matched_story_id),
+            "similarity": row.semantic_similarity,
+            "title_similarity": row.title_similarity,
+            "development_match": row.development_match,
+            "new_facts": json.loads(row.new_facts_detected) if row.new_facts_detected else [],
+            "rule": row.rule,
+            "reason": row.reason,
+            "content_basis": row.content_basis,
+            "method_version": row.method_version,
+        }
+        for story_id, row in best.items()
+    }
 
 
 def _serialize_episode(db, episode: Episode) -> dict:
@@ -1225,6 +1320,7 @@ def _serialize_episode(db, episode: Episode) -> dict:
 
     primary = []
     backup = []
+    relations = _historical_relations(db, [item.id for _, item, _, _ in rows])
 
     for episode_story, item, state, content in rows:
         entry = {
@@ -1252,6 +1348,9 @@ def _serialize_episode(db, episode: Episode) -> dict:
             # editor decides whether to swap it out.
             "repeats_story_id": state.repeats_story_id,
             "repeat_reason": state.repeat_reason,
+            # Semantic historical-dedup verdict (app/dedup); None when the story had no related
+            # published coverage. Stories judged duplicates never reach an episode.
+            "historical_relation": relations.get(item.id),
             # Needed by the dashboard's "click a story, jump the
             # player" feature (sums preceding durations) and its edit
             # panel -- None until that story's content pipeline runs.
@@ -1359,6 +1458,42 @@ def list_stories(limit: int = 30):
             }
             for item, state in rows
         ]
+
+
+@app.get("/api/v1/historical-dedup")
+def list_historical_dedup(date: str | None = None):
+    """
+    Every historical-dedup verdict for one collection day (default: the
+    current one): stories held back as repeats of already-published
+    coverage first, then stories judged a new development of covered ground.
+    """
+    _validate_date_param(date, "date")
+    day = date_cls.fromisoformat(date) if date else target_collection_date()
+
+    with SessionLocal() as db:
+        items = {
+            item.id: item
+            for item in db.query(NewsItem).filter(NewsItem.collection_date == day).all()
+        }
+        relations = _historical_relations(db, items.keys())
+        stories = [
+            {
+                "id": story_id,
+                "title": items[story_id].title,
+                "url": items[story_id].canonical_url,
+                "source_name": items[story_id].source_name,
+                **relation,
+            }
+            for story_id, relation in relations.items()
+        ]
+        stories.sort(key=lambda s: (s["decision"] != "duplicate", -s["similarity"]))
+        return {
+            "date": day.isoformat(),
+            "method_version": DEDUP_METHOD_VERSION,
+            "duplicates": sum(1 for s in stories if s["decision"] == "duplicate"),
+            "new_developments": sum(1 for s in stories if s["decision"] != "duplicate"),
+            "stories": stories,
+        }
 
 
 @app.get("/api/v1/review-queue")

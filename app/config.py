@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # in the eligible pool.
     news_window_hours: int = 22
 
+    # Local embedding model for historical duplicate detection (app/dedup/embedder.py). The model
+    # is downloaded once into the cache dir (under media/, which is gitignored and volume-mounted).
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_cache_dir: str = "/app/media/.model_cache"
+
     # YouTube Data API v3 credentials for the Publishing Worker (see
     # app/publishing/youtube_publisher.py). None until a real Google
     # Cloud OAuth client + one-time consent flow exist -- see

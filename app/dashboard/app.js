@@ -123,6 +123,18 @@ function renderEditMetaHtml(story) {
     `;
   }
 
+  // Semantic historical dedup (app/dedup): how this story relates to coverage already published.
+  const rel = story.historical_relation;
+  if (rel) {
+    html += `
+      <div class="edit-meta-row">
+        <dt>Historical dedup</dt>
+        <dd>${rel.decision === "duplicate" ? "Duplicate of" : "New development after"} #${rel.matched_story_id}
+          ${escapeHtml(rel.matched_title || "")} (similarity ${Number(rel.similarity).toFixed(2)}) -- ${escapeHtml(rel.reason || "")}</dd>
+      </div>
+    `;
+  }
+
   const facts = story.extracted_facts;
   if (facts && (facts.companies.length || facts.products.length || facts.events.length || facts.dates.length || facts.claims.length)) {
     const parts = [];
@@ -209,6 +221,10 @@ async function init() {
   const params = new URLSearchParams(location.search);
   if (params.has("review")) {
     await renderReviewQueue(params.get("review"));
+    return;
+  }
+  if (params.has("dedup")) {
+    await renderHistoricalDedup(params.get("dedup"));
     return;
   }
 
@@ -347,7 +363,7 @@ function wireCollectButton() {
 // ---------------------------------------------------------
 // Process Episode (dev/local only) -- fires POST /api/v1/episodes/
 // select, which is now the processing trigger (classify -> dedup ->
-// content-dedup -> verification -> rank/select -> produce -> QA, see
+// content-dedup -> historical-dedup -> verification -> rank/select -> produce -> QA, see
 // app/tasks/scheduled.py's run_daily_processing). Deliberately a
 // separate button/click from Collect New Stories above -- collection
 // and processing are two distinct operations and processing is never
@@ -373,13 +389,15 @@ function formatProcessSummary(result) {
   const c = result.classify || {};
   const d = result.dedup || {};
   const cd = result.content_dedup || {};
+  const hd = result.historical_dedup || {};
   const v = result.verification || {};
   const r = result.ranking || {};
 
   const lines = [
     `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates, ${c.ai_review ?? "?"} to review`,
     `Dedup: ${d.duplicates_found ?? "?"} duplicates found (of ${d.checked ?? "?"} checked)`,
-    `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates, ${cd.historical_repeats_found ?? "?"} historical repeats`,
+    `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates`,
+    `Historical-dedup: ${hd.duplicates ?? "?"} repeats of published stories, ${hd.new_developments ?? "?"} new developments`,
     `Verification: ${v.verified ?? "?"} verified / ${v.unverified ?? "?"} unverified`,
   ];
 
@@ -637,6 +655,79 @@ async function renderReviewQueue(date) {
 }
 
 // ---------------------------------------------------------
+// Historical dedup -- what the semantic detector (app/dedup) decided for
+// one collection day: stories held back as repeats of already-published
+// coverage, and stories kept as a new development of covered ground.
+// Read-only; every row shows the rule and the reason behind the decision.
+// ---------------------------------------------------------
+
+function dedupDecisionLabel(r) {
+  return r.decision === "duplicate" ? "duplicate" : "new development";
+}
+
+function dedupCardHtml(s) {
+  const dup = s.decision === "duplicate";
+  const matchedDate = s.matched_episode_date ? ` &middot; published in the ${escapeHtml(String(s.matched_episode_date))} episode` : "";
+  const facts = (s.new_facts || []).length
+    ? `<p class="dedup-facts">New facts: ${escapeHtml(s.new_facts.join("; "))}</p>`
+    : "";
+  const override = s.editor_override
+    ? `<span class="pill">editor override: ${escapeHtml(s.editor_override)}</span>`
+    : "";
+  return `
+    <div class="panel dedup-card" data-id="${s.id}">
+      <h3>#${s.id} ${escapeHtml(s.title)}</h3>
+      <p class="dedup-meta">${escapeHtml(s.source_name || "")}</p>
+      <p>
+        <span class="pill ${dup ? "repeat-flagged" : "dedup-new"}">${dedupDecisionLabel(s)}</span>
+        <span class="pill">${escapeHtml(s.development_match || "")}</span>
+        <span class="pill">similarity ${Number(s.similarity).toFixed(2)}</span>
+        ${override}
+      </p>
+      <p class="dedup-matched">${dup ? "Repeats" : "Follows"} #${s.matched_story_id}: ${escapeHtml(s.matched_title || "")}${matchedDate}</p>
+      <p class="dedup-reason">${escapeHtml(s.reason || "")} <em>(${escapeHtml(s.rule || "")}, ${escapeHtml(s.content_basis || "")} text)</em></p>
+      ${facts}
+    </div>
+  `;
+}
+
+async function renderHistoricalDedup(date) {
+  app.innerHTML = '<p class="loading">Loading historical dedup…</p>';
+
+  let data;
+  try {
+    data = await apiGet("/historical-dedup" + (date ? `?date=${encodeURIComponent(date)}` : ""));
+  } catch (err) {
+    app.innerHTML = `<p class="error">Failed to load historical dedup: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  const dups = data.stories.filter((s) => s.decision === "duplicate");
+  const news = data.stories.filter((s) => s.decision !== "duplicate");
+
+  app.innerHTML = `
+    <p><a class="btn btn-ghost" href="/dashboard/">&larr; Episodes</a></p>
+    <h1>Historical dedup</h1>
+    <p class="dedup-controls">
+      <label>Collection day <input type="date" id="dedup-date" value="${escapeAttr(data.date)}"></label>
+      <span>${data.duplicates} held back as repeats, ${data.new_developments} new development(s) of covered ground</span>
+      <span class="review-version">${escapeHtml(data.method_version)}</span>
+    </p>
+    <p class="review-help">A story is held back only when it reports substantially the same development that was already published. Sharing a company, product or topic is not enough. Stories with no related published coverage are not listed.</p>
+    <h2>Held back as repeats (${dups.length})</h2>
+    ${dups.map(dedupCardHtml).join("") || '<p class="loading">None for this day.</p>'}
+    <details class="dedup-new-list">
+      <summary><strong>Kept as new developments (${news.length})</strong> -- related to published coverage but not the same development</summary>
+      ${news.map(dedupCardHtml).join("") || '<p class="loading">None for this day.</p>'}
+    </details>
+  `;
+
+  document.getElementById("dedup-date").addEventListener("change", (ev) => {
+    location.search = "?dedup=" + encodeURIComponent(ev.target.value);
+  });
+}
+
+// ---------------------------------------------------------
 // Episode list
 // ---------------------------------------------------------
 
@@ -651,7 +742,7 @@ async function renderEpisodeList() {
     return;
   }
 
-  const reviewLinkHtml = '<p><a class="btn" href="?review=" id="review-link">Review queue</a></p>';
+  const reviewLinkHtml = '<p><a class="btn" href="?review=" id="review-link">Review queue</a> <a class="btn" href="?dedup=" id="dedup-link">Historical dedup</a></p>';
 
   const collectPanelHtml = isDevEnvironment(appEnv)
     ? `
@@ -668,12 +759,14 @@ async function renderEpisodeList() {
           <button class="btn btn-small" id="classify-btn" type="button">1. Classify</button>
           <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
           <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
-          <button class="btn btn-small" id="verify-btn" type="button">4. Verify</button>
-          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select / Update</button>
+          <button class="btn btn-small" id="historical-dedup-btn" type="button">4. Historical-Dedup</button>
+          <button class="btn btn-small" id="verify-btn" type="button">5. Verify</button>
+          <button class="btn btn-small" id="rank-btn" type="button">6. Rank &amp; Select / Update</button>
         </div>
         <p id="classify-result" class="collect-result"></p>
         <p id="dedup-stage-result" class="collect-result"></p>
         <p id="content-dedup-result" class="collect-result"></p>
+        <p id="historical-dedup-result" class="collect-result"></p>
         <p id="verify-result" class="collect-result"></p>
         <p id="rank-result" class="collect-result"></p>
 
@@ -702,7 +795,14 @@ async function renderEpisodeList() {
       btnId: "content-dedup-btn", resultId: "content-dedup-result", path: "/processing/content-dedup",
       formatResult: (r) =>
         `Fetched ${r.fetch_success ?? "?"}/${r.fetch_attempted ?? "?"} articles -- ` +
-        `${r.content_duplicates_found ?? "?"} content duplicates, ${r.historical_repeats_found ?? "?"} historical repeats.`,
+        `${r.content_duplicates_found ?? "?"} content duplicates.`,
+    });
+    wireStageButton({
+      btnId: "historical-dedup-btn", resultId: "historical-dedup-result", path: "/processing/historical-dedup",
+      formatResult: (r) => r.skipped_reason
+        ? `Skipped: ${escapeHtml(r.skipped_reason)}`
+        : `${r.duplicates ?? "?"} repeats of published stories, ${r.new_developments ?? "?"} new developments, ` +
+          `${r.already_decided ?? 0} already decided (of ${r.candidates ?? "?"} candidates).`,
     });
     wireStageButton({
       btnId: "verify-btn", resultId: "verify-result", path: "/processing/verify",
@@ -829,7 +929,7 @@ function formatElapsed(ms) {
 }
 
 // Visual workflow chart -- Collect -> Classify -> Dedup -> Content-
-// Dedup -> Verify -> Rank & Select -> Produce -> QA -> Approve ->
+// Dedup -> Historical-Dedup -> Verify -> Rank & Select -> Produce -> QA -> Approve ->
 // Publish, each stage's real current status/count for this episode's
 // date at a glance (ep.pipeline, from app.main._compute_pipeline_stages).
 // Complements, doesn't replace, the per-stage buttons and existing

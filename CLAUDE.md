@@ -212,6 +212,19 @@ Don't re-diagnose from scratch.
   script text) and Produce again. The only SFX in the mix is the per-boundary ping
   (`sfx_story_gap`); the removed intro/outro chimes are documented in `TODO.md`.
 
+- The historical dedup stage needs `fastembed` (pinned in `requirements.txt`)
+  in BOTH the `api` and `worker` images. A rebuild is required after pulling
+  it in; an ad hoc `pip install` in one running container does not reach the
+  other, and the stage then logs `EmbedderUnavailable` and silently skips
+  (stories stay eligible, nothing is deduplicated). Check with
+  `docker compose exec -T worker python -c "import fastembed"`. The model
+  caches in `media/.model_cache` (gitignored); first load takes ~28 s.
+- Dedup/classification verdict tables are versioned (`method_version`
+  `semantic-v1`, `RULES_VERSION` `rules-v1`). After changing a threshold or
+  pattern, bump the version and re-run `python -m app.scripts.dedup_replay`
+  (read-only) before trusting the change; never edit rows in
+  `editorial.historical_story_relations` by hand -- set `editor_override`.
+
 - YouTube OAuth consent screen must be set to **"In production"** (Publish app) in
   each Google Cloud project, dev and prod. In "Testing" status the refresh token
   expires after 7 days and publish fails with `invalid_grant: Bad Request`; fix is to

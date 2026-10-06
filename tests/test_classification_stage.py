@@ -202,4 +202,4 @@ def test_migration_extends_the_previous_head_and_is_the_only_head():
             revisions.add(rev.group(1))
         if down and down.group(1):
             parents.add(down.group(1))
-    assert revisions - parents == {"d5b8e2c4f917"}
+    assert revisions - parents == {"a7c4e1b9d268"}  # classification migration is its parent

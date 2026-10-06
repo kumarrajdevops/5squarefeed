@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.dates import target_collection_date
 from app.db import SessionLocal
+from app.dedup.relations import effective_duplicate_story_ids
 from app.models import Episode, EpisodeStory, NewsItem, StoryState
 from app.ranking.engine import ai_relevance_input, compute_total_score
 from app.worker.celery_app import celery_app
@@ -154,6 +155,13 @@ def _score_and_select_top_stories(
 
     if already_primary_story_ids:
         eligible_query = eligible_query.filter(NewsItem.id.notin_(already_primary_story_ids))
+
+    # Stories the historical detector decided report a development already published
+    # (app/dedup, editor overrides respected) never enter the pool; a story judged a
+    # new_development of covered ground stays eligible and ranks as usual.
+    historical_duplicates = effective_duplicate_story_ids(db)
+    if historical_duplicates:
+        eligible_query = eligible_query.filter(NewsItem.id.notin_(historical_duplicates))
 
     rows = eligible_query.all()
 

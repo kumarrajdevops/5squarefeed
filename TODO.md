@@ -2635,6 +2635,118 @@ Uncommitted (working tree only; nothing pushed).
       (cue duration/word count); it does not block the episode render.
 
 
+### This session -- 2026-10-04, part 53 (rules-v1 classification gate + review lane)
+
+- [x] **Classifier.** `app/filters/classification_rules.py` ("rules-v1") is
+      deterministic and LLM-free. Order: non-news patterns (deal, stream,
+      event, tutorial, product review) reject; opinion/personal-voice and
+      roundup/podcast titles go to review if AI-related, else reject; an AI
+      term in the title plus a development verb is a candidate, without a
+      verb it is review; an AI term only in the summary, or only an
+      adjacent term (robots, chips, data centers...), is review; nothing
+      AI-related is rejected. Any pattern or order change must bump
+      `RULES_VERSION`. Bare "AI" is matched case-sensitively.
+- [x] **Pipeline state.** `app/tasks/classify.py` maps candidate ->
+      `ai_candidate`, review -> `ai_review`, reject -> `not_ai` and stores
+      `classifier_version`, `classifier_disposition`,
+      `classifier_ai_relatedness`, `classifier_content_flag`, `filter_reason`
+      (migration `d5b8e2c4f917`). The legacy keyword score is still stored
+      but no longer decides anything. Every downstream pool filter selects
+      `ai_relevance == "ai_candidate"`, so review stories stay out of dedup,
+      verification, ranking and QA until an editor promotes them.
+- [x] **Review lane.** `GET /api/v1/review-queue`,
+      `POST /api/v1/stories/{id}/review` (promote | reject) in
+      `app/main.py`, and dashboard UI. Decisions are recorded
+      (`review_decision`, `reviewed_at`).
+- [x] **Ranking.** For rows with a classifier result, the AI-relevance input
+      is 1.0 for candidates and promoted review stories
+      (`ranking/engine.py::ai_relevance_input`); legacy rows keep
+      `ai_relevance_score`. Weights are unchanged.
+- Evaluation set and harness: `eval/classification/` (human-corrected labels,
+  never the old classifier's output). Tests: `tests/test_classification_rules.py`,
+  `test_classification_stage.py`, `test_review_lane.py`,
+  `test_ranking_classification_signal.py`.
+
+### This session -- 2026-10-06, part 54 (semantic historical dedup, `semantic-v1`)
+
+- [x] **Why.** The old historical check (TF-IDF >= 0.35 against past primaries
+      in `content_dedup.py` Step 3) flagged shared topics, not repeated
+      developments, and only set the soft `repeats_story_id` signal, so
+      flagged repeats were still published. Replaced.
+- [x] **Editorial rule.** A story is a duplicate only when it reports
+      substantially the same development 5squareFeed already published. The
+      same company, product, model, topic or event is not enough. Output is
+      only `duplicate` or `new_development`; there is no "possible repeat"
+      bucket and no human review (overrides are reserved in the schema only).
+- [x] **Where.** New pipeline stage `deduplicate_against_history`
+      (`app/tasks/historical_dedup.py`, Celery task `run_historical_dedup`)
+      runs after same-day content dedup and before verification. Same-day
+      dedup and `canonical_story_id` are unchanged; `content_dedup.py` Step 3
+      is removed. The stage is wrapped in try/except with rollback in
+      `scheduled.py` (a detector failure never blocks the episode), and an
+      unavailable embedding model skips the stage and leaves stories eligible.
+- [x] **Corpus.** Primaries (`EpisodeStory.selection_status='primary'`) of
+      approved or published episodes, earliest episode date per story, with
+      an as-of date mask. No 48 h cutoff. Raw, rejected, backup and
+      unapproved-draft stories never count as coverage.
+- [x] **Method (`app/dedup/`).** `fastembed` 0.8.1 with `BAAI/bge-small-en-v1.5`
+      (local ONNX, no vector DB; vector cache `media/.model_cache/vectors.npz`)
+      embeds title + first four sentences of the stored article (existing
+      `raw_content`, no new scraping). One vectorised dot product retrieves
+      candidates (>= 0.70, max 10); `decision.py::decide()` is a pure,
+      deterministic function over similarity, development type (launch,
+      feature, pricing, security, personnel...), subject overlap and new facts
+      (headline numbers/entities/terms, lead novelty). Embeddings only say
+      "same topic"; the rules decide "same development". Every verdict stores
+      its `rule` and a plain-English `reason`. Guards: first-person accounts
+      and explainer headlines below 0.92 similarity stay new; articles with no
+      text need strong headline evidence (`limited_evidence` keeps them new).
+- [x] **Persistence.** `editorial.historical_story_relations` (migration
+      `a7c4e1b9d268`): unique (story_id, matched_story_id, method_version),
+      insert-only so reruns are idempotent. `editor_override`/`override_at` are
+      reserved and never written by the pipeline; effective decision =
+      coalesce(override, decision). Ranking drops stories whose effective
+      decision is `duplicate` (`app/tasks/ranking.py`). `repeats_story_id` /
+      `repeat_reason` are kept but no longer written. Stories judged unrelated
+      (< 0.70) are not stored.
+- [x] **Read-only replay.** `python -m app.scripts.dedup_replay [--date D |
+      --start-date/--end-date | --limit N] [--corpus-mode approved|approved+draft]
+      [--max-story-id N]` reconstructs the old TF-IDF result per date, runs the
+      new detector, and writes `media/reports/dedup_replay_<stamp>_<mode>.md`
+      and `.json` (per-date table, executive comparison, highlights, performance).
+      Runs in a READ ONLY transaction and never commits.
+- [x] **Live replay, 12 dates 2026-09-20..10-05, 457 candidates.** Approved
+      corpus: 9 duplicates, 448 new developments, 1.76 s (3.8 ms/candidate,
+      164 primaries). Old system: 28 repeat flags, only 5 confirmed as true
+      duplicates; 4 repeats it missed are now caught. Eligible pool 441 -> 434.
+      Approved+draft corpus (266 primaries): 14 duplicates. Read-only verified
+      by identical row checksums of every other table before and after.
+- [x] **Live run.** `run_historical_dedup('2026-10-05')` through the worker
+      wrote 25 rows (2 duplicates: 710->482, 744->385); a second run wrote none.
+- [x] **Dashboard.** `GET /api/v1/historical-dedup?date=`, dashboard page
+      `?dedup=<date>`, `historical_relation` on every story in an episode payload
+      (shown in the edit panel), a Historical-Dedup stage in the workflow chart,
+      and a "4. Historical-Dedup" step button (`POST /api/v1/processing/historical-dedup`).
+      The old "historical repeat(s)" count (read the unwritten `repeats_story_id`)
+      was removed from the Content-Dedup stage, step button and process summary.
+      The step buttons are independent endpoints, not chained: Classify -> Dedup ->
+      Content-Dedup -> Historical-Dedup -> Verify -> Rank must be run in that order;
+      "Process / Update Episode" chains them all.
+- [ ] Not yet verified: a full `run_daily_processing` pass (classify through
+      ranking) with the new stage on a fresh collection day.
+- **Known limits / watch list:** 396->248 (Dots enterprise recap), 298->124 and
+      500->16 (draft-corpus only) may be false positives; 358/353 and 254/160
+      are accepted conservative false negatives. Thresholds were calibrated on
+      41 labelled live pairs from one corpus; re-run the replay after any change
+      and bump `METHOD_VERSION` in `app/dedup/decision.py`.
+- **Ops:** `fastembed` (~67 MB onnxruntime + ~65 MB model, one-time ~28 s cold
+      load, model downloads once from HF then works offline) is pinned in
+      `requirements.txt`; the image must be rebuilt for api and worker. Tests:
+      `tests/test_historical_dedup.py` (21; the scenario tests run the real
+      model and skip if it is unavailable).
+- Test-fixture stories 797-815 exist in the live DB (not removed); the replay
+      excludes them with `--max-story-id 796`.
+
 ## Known issues / follow-ups
 
 - [x] ~~Automated QA's `source_verification` check always reports
