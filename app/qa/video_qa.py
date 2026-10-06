@@ -138,6 +138,30 @@ def run_qa_checks(episode, story_rows: list[tuple], video_path: Path | None) -> 
         ),
     })
 
+    # 6b. Script quality -- the deterministic briefing gate (app/content/
+    # briefing). Informational about "review" scripts; fails only when a
+    # story in the video has an insufficient source or a failed script
+    # grade. Human-edited scripts ("edited") and older stories with no
+    # grade (None) are not judged.
+    weak = [
+        item.id for _, item, state, content in story_rows
+        if getattr(state, "source_sufficiency", None) == "insufficient"
+        or getattr(content, "script_quality_status", None) == "fail"
+    ]
+    review = [
+        item.id for _, item, _, content in story_rows
+        if getattr(content, "script_quality_status", None) == "review"
+    ]
+    checks.append({
+        "check": "script_quality",
+        "passed": len(weak) == 0,
+        "detail": (
+            (f"no insufficient or failed scripts among {total} stories" if not weak
+             else f"{len(weak)} stories with an insufficient source or failed script: {weak}")
+            + (f"; {len(review)} flagged for review: {review}" if review else "")
+        ),
+    })
+
     # 7. Video integrity -- the combined episode file exists and has
     # both a video and an audio stream.
     if video_path is None or not video_path.exists():

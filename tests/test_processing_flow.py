@@ -21,7 +21,14 @@ def _insert_raw_item(db, title, url, source_name="Test Source"):
         published_at=published_at,
         collected_at=datetime.now(timezone.utc),
         collection_date=TARGET_DATE,
-        raw_summary=f"{title} -- a real update from {source_name}.",
+        # Rich enough to pass the briefing sufficiency gate (app/content/briefing):
+        # stories whose only source is a one-line teaser are excluded at ranking.
+        raw_summary=(
+            f"{title} -- a real update from {source_name}. "
+            f"The company behind {title.split()[0]} said the change reaches 1,200 customers on March 3, 2026. "
+            f"Engineers at Nova Labs reported the {title.split()[-1]} work cutting costs by 40 percent, according to {source_name}. "
+            f"Engineers expect a wider rollout across Europe and Asia in April."
+        ),
         status="collected",
     )
     db.add(item)
@@ -105,13 +112,67 @@ def test_run_daily_processing_is_idempotent_for_the_same_target_date(db_session,
 
     monkeypatch.setattr(scheduled, "SessionLocal", lambda: db_session)
     first = scheduled.run_daily_processing(TARGET_DATE.isoformat())
+    # The stubbed produce doesn't touch the episode; mark it produced the
+    # way the real task would.
+    db_session.query(Episode).filter(Episode.episode_date == TARGET_DATE).one().video_status = "ready"
+    db_session.commit()
     second = scheduled.run_daily_processing(TARGET_DATE.isoformat())
 
     assert first["ranking"]["created"] is True
     assert second["ranking"]["created"] is False
-    assert second["ranking"]["reason"] == "existing_draft_reused"
+    assert second["ranking"]["updated"] is True
+    assert second["ranking"]["reason"] == "existing_draft_updated"
+    assert second["ranking"]["added_primary"] == 0
 
     # Re-running never creates a second episode for the same date, and
     # never re-classifies an already-classified raw item.
     assert db_session.query(Episode).filter(Episode.episode_date == TARGET_DATE).count() == 1
     assert second["classify"]["classified"] == 0
+
+    # Nothing new and the video is already ready -> no re-produce.
+    assert second["produce_status"] == "unchanged"
+
+
+def test_run_daily_processing_update_keeps_first_run_and_reproduces(db_session, monkeypatch):
+    _stub_out_production(monkeypatch)
+    first_id = _insert_raw_item(db_session, "OpenAI announces new AI model", "https://example.test/a").id
+
+    monkeypatch.setattr(scheduled, "SessionLocal", lambda: db_session)
+    first = scheduled.run_daily_processing(TARGET_DATE.isoformat())
+    episode_id = first["ranking"]["episode_id"]
+    episode = db_session.get(Episode, episode_id)
+    episode.video_status = "ready"
+    db_session.commit()
+
+    new_id = _insert_raw_item(db_session, "Robotics lab unveils warehouse automation hardware", "https://example.test/b").id
+    # SQLite drops tzinfo on reload; don't keep the aware instance around.
+    db_session.expunge_all()
+    second = scheduled.run_daily_processing(TARGET_DATE.isoformat())
+
+    assert second["ranking"]["updated"] is True
+    assert second["ranking"]["added_primary"] == 1
+    assert second["produce_status"] == "ready"
+
+    rows = {
+        r.story_id: r.rank_position
+        for r in db_session.query(EpisodeStory).filter(EpisodeStory.episode_id == episode_id).all()
+    }
+    assert rows[first_id] == 1
+    assert new_id in rows
+
+
+def test_run_daily_processing_does_not_produce_for_approved_episode(db_session, monkeypatch):
+    produced = []
+    _stub_out_production(monkeypatch)
+    monkeypatch.setattr(
+        scheduled, "produce_episode_video",
+        lambda episode_id: produced.append(episode_id) or {"status": "ready"},
+    )
+    db_session.add(Episode(episode_date=TARGET_DATE, status="approved"))
+    db_session.commit()
+
+    monkeypatch.setattr(scheduled, "SessionLocal", lambda: db_session)
+    result = scheduled.run_daily_processing(TARGET_DATE.isoformat())
+
+    assert result["ranking"]["reason"] == "episode_approved"
+    assert produced == []

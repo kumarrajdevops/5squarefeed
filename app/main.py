@@ -20,6 +20,8 @@ from app.tasks.content import produce_story_video_task
 from app.tasks.content_dedup import run_enrich_and_dedup_by_content
 from app.tasks.dedup import run_deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
+from app.tasks.episode_storyboard import read_report as read_storyboard_report
+from app.tasks.episode_storyboard import run_episode_storyboards, start_report as start_storyboard_report
 from app.tasks.episode_video import produce_episode_video
 from app.tasks.publishing import publish_episode_to_youtube
 from app.tasks.ranking import (
@@ -350,7 +352,9 @@ def trigger_rank(episode_date: str | None = None):
     Rank + select the Top 25 + 5 backups and create the episode_date's
     Episode row -- see app/tasks/ranking.py::run_ranking_selection.
     Same idempotency as POST /api/v1/episodes/select (an existing
-    episode is never duplicated or silently touched), but without that
+    episode is never duplicated; an existing draft is topped up with
+    new stories while its first-run stories stick, and an approved/
+    rejected/published one is left alone), but without that
     endpoint's synchronous pre-check -- the task itself still returns
     a blocked/reused result rather than erroring, it's just not known
     until the task result is read back.
@@ -448,7 +452,9 @@ def trigger_ranking_selection(episode_date: str | None = None):
     task:
 
     - No existing episode -> queues run_daily_processing as before.
-    - Existing draft -> 200, returns that episode's id, queues nothing.
+    - Existing draft -> queues run_daily_processing, which UPDATES the
+      draft: its first-run stories stick and only empty slots are
+      topped up (see app/tasks/ranking.py::_update_draft_episode).
     - Existing rejected/approved/published -> 409, queues nothing.
     - More than one existing episode for this episode_date (only
       possible for historical data predating
@@ -508,23 +514,16 @@ def trigger_ranking_selection(episode_date: str | None = None):
         existing = existing_episodes[0]
         reason = classify_existing_episode(existing)
 
-        if reason == "existing_draft_reused":
-            return {
-                "episode_id": existing.id,
-                "episode_date": parsed_episode_date.isoformat(),
-                "created": False,
-                "reason": reason,
-            }
-
-        return JSONResponse(
-            status_code=409,
-            content={
-                "episode_id": existing.id,
-                "episode_date": parsed_episode_date.isoformat(),
-                "error": reason,
-                "detail": _EXISTING_EPISODE_MESSAGES[reason],
-            },
-        )
+        if reason != "existing_draft_reused":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "episode_id": existing.id,
+                    "episode_date": parsed_episode_date.isoformat(),
+                    "error": reason,
+                    "detail": _EXISTING_EPISODE_MESSAGES[reason],
+                },
+            )
 
     task = run_daily_processing.delay(parsed_episode_date.isoformat())
     return {"task_id": task.id, "status": "queued"}
@@ -574,6 +573,41 @@ def process_episode(episode_id: int):
     /produce) to preserve existing callers/compatibility.
     """
     return trigger_episode_production(episode_id)
+
+
+@app.post("/api/v1/episodes/{episode_id}/storyboard")
+def trigger_episode_storyboard(episode_id: int):
+    """
+    Build (or reuse) content, audio and the storyboard for every primary
+    story, then report what is wrong (storyboard QA failures, stories
+    that could not be built) -- the first half of Process, runnable on
+    its own so problems show up before the long render. Process later
+    reuses everything built here. The report is written as "running"
+    here, synchronously, before queueing (same race as Produce).
+    """
+    with SessionLocal() as db:
+        episode = db.get(Episode, episode_id)
+
+        if episode is None:
+            raise HTTPException(status_code=404, detail="Episode not found.")
+
+        if episode.video_status == "producing":
+            raise HTTPException(status_code=409, detail="Episode is being processed; try again when it finishes.")
+
+    existing = read_storyboard_report(episode_id)
+    if existing is not None and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="A storyboard check is already running for this episode.")
+
+    start_storyboard_report(episode_id)
+    task = run_episode_storyboards.delay(episode_id)
+    return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
+@app.get("/api/v1/episodes/{episode_id}/storyboard")
+def get_episode_storyboard(episode_id: int):
+    """Latest storyboard report for the episode, or status "none"."""
+    report = read_storyboard_report(episode_id)
+    return report if report is not None else {"episode_id": episode_id, "status": "none"}
 
 
 @app.post("/api/v1/episodes/{episode_id}/qa")
@@ -1215,6 +1249,15 @@ def _serialize_episode(db, episode: Episode) -> dict:
             "summary": content.summary if content else None,
             "script_text": content.script_text if content else None,
             "support_text": content.support_text if content else None,
+            # Source sufficiency + script grade (app/content/briefing); labels only.
+            "source_sufficiency": state.source_sufficiency,
+            "sufficiency_detail": json.loads(state.sufficiency_detail) if state.sufficiency_detail else None,
+            "content_extraction_method": state.content_extraction_method,
+            "source_word_count": state.source_word_count,
+            "script_word_count": content.script_word_count if content else None,
+            "script_quality_status": content.script_quality_status if content else None,
+            "script_generation_reason": content.script_generation_reason if content else None,
+            "content_error": content.error_message if content else None,
             "audio_duration_seconds": content.audio_duration_seconds if content else None,
             # video_path is a fixed per-story URL that gets overwritten
             # in place on every regeneration (edit -> reset -> re-Produce)
@@ -1425,6 +1468,13 @@ def update_story_content(story_id: int, body: StoryContentUpdate):
             content.summary = body.summary
         if body.script_text is not None:
             content.script_text = body.script_text
+            # A human wrote this text: the generated-script grade no longer applies.
+            from app.content.support_facts import split_sentences
+
+            content.script_word_count = len(body.script_text.split())
+            content.script_sentence_count = len(split_sentences(body.script_text))
+            content.script_quality_status = "edited"
+            content.script_generation_reason = "edited by a human"
         if body.support_text is not None:
             content.support_text = body.support_text.strip() or None
 

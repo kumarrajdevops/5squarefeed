@@ -146,38 +146,108 @@ def test_run_ranking_selection_creates_when_none_exists(db_session):
     assert len(snapshot) == 1
 
 
-def test_run_ranking_selection_reuses_existing_draft_without_touching_snapshot(db_session):
-    _insert_story(db_session, "https://example.com/a")
-    first = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
-    assert first["created"] is True
-
-    before = sorted(
-        (es.id, es.story_id) for es in
-        db_session.query(EpisodeStory)
-        .filter(EpisodeStory.episode_id == first["episode_id"])
-        .all()
+def _snapshot(db, episode_id):
+    return sorted(
+        (es.story_id, es.rank_position, es.selection_status) for es in
+        db.query(EpisodeStory).filter(EpisodeStory.episode_id == episode_id).all()
     )
 
-    # A brand new eligible story appears before the second call -- if
-    # selection silently re-ran, it would show up in the snapshot.
-    _insert_story(db_session, "https://example.com/b")
+
+def test_run_ranking_selection_update_keeps_first_run_and_adds_new_story(db_session):
+    first_item = _insert_story(db_session, "https://example.com/a")
+    first = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+    assert first["created"] is True
+    before = _snapshot(db_session, first["episode_id"])
+    assert before == [(first_item.id, 1, "primary")]
+
+    new_item = _insert_story(db_session, "https://example.com/b")
 
     second = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
 
-    assert second == {
-        "episode_id": first["episode_id"],
-        "episode_date": EPISODE_DATE.isoformat(),
-        "created": False,
-        "reason": "existing_draft_reused",
-    }
-    after = sorted(
-        (es.id, es.story_id) for es in
-        db_session.query(EpisodeStory)
-        .filter(EpisodeStory.episode_id == first["episode_id"])
-        .all()
-    )
-    assert after == before
+    assert second["created"] is False
+    assert second["updated"] is True
+    assert second["reason"] == "existing_draft_updated"
+    assert second["episode_id"] == first["episode_id"]
+    assert second["kept_stories"] == 1
+    assert second["added_primary"] == 1
+    assert second["added_backup"] == 0
+
+    after = _snapshot(db_session, first["episode_id"])
+    # First-run story keeps its exact position; the newcomer takes the next free one.
+    assert (first_item.id, 1, "primary") in after
+    assert (new_item.id, 2, "primary") in after
+    assert len(after) == 2
     assert db_session.query(Episode).filter(Episode.episode_date == EPISODE_DATE).count() == 1
+
+
+def test_run_ranking_selection_update_with_nothing_new_changes_nothing(db_session):
+    _insert_story(db_session, "https://example.com/a")
+    first = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+    episode = db_session.get(Episode, first["episode_id"])
+    changed_before = episode.content_changed_at
+    before = _snapshot(db_session, first["episode_id"])
+
+    second = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+
+    assert second["updated"] is True
+    assert second["added_primary"] == 0
+    assert second["added_backup"] == 0
+    assert second["eligible_new"] == 0
+    assert _snapshot(db_session, first["episode_id"]) == before
+    db_session.refresh(episode)
+    assert episode.content_changed_at == changed_before
+
+
+def test_run_ranking_selection_update_fills_only_free_slots_and_keeps_order(db_session):
+    # 25 primary + 3 backup selected on the first run.
+    for i in range(28):
+        _insert_story(db_session, f"https://example.com/first-{i}")
+    first = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+    before = _snapshot(db_session, first["episode_id"])
+    assert sum(1 for r in before if r[2] == "primary") == 25
+    assert sum(1 for r in before if r[2] == "backup") == 3
+
+    # A dashboard-style gap: drop one primary, as if the editor removed it.
+    gap_row = (
+        db_session.query(EpisodeStory)
+        .filter(EpisodeStory.episode_id == first["episode_id"], EpisodeStory.rank_position == 7)
+        .one()
+    )
+    db_session.delete(gap_row)
+    db_session.commit()
+
+    for i in range(10):
+        _insert_story(db_session, f"https://example.com/new-{i}")
+
+    second = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+
+    assert second["added_primary"] == 1   # only the freed primary slot
+    assert second["added_backup"] == 2    # backup had 3 of 5
+    after = _snapshot(db_session, first["episode_id"])
+    assert len(after) == 30
+    first_run = {r for r in before if r[1] != 7}
+    assert first_run <= set(after)        # nothing moved, demoted or removed
+    positions = [r[1] for r in after]
+    assert sorted(positions) == list(range(1, 31))
+    assert (  # the gap went to a primary, not a backup
+        [r for r in after if r[1] == 7][0][2] == "primary"
+    )
+
+
+def test_run_ranking_selection_update_skips_repeat_of_episode_story(db_session):
+    kept = _insert_story(db_session, "https://example.com/a")
+    first = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+
+    repeat = _insert_story(db_session, "https://example.com/b")
+    state = db_session.get(StoryState, repeat.id)
+    state.repeats_story_id = kept.id
+    db_session.commit()
+
+    second = _run_ranking_selection(db_session, EPISODE_DATE, NOW)
+
+    assert second["added_primary"] == 0
+    assert second["skipped_repeats_of_episode"] == 1
+    assert [r[0] for r in _snapshot(db_session, first["episode_id"])] == [kept.id]
 
 
 def test_run_ranking_selection_blocks_on_rejected(db_session):
@@ -394,23 +464,18 @@ def test_select_endpoint_queues_when_no_existing_episode(monkeypatch, sqlite_ses
     mock_delay.assert_called_once_with("2026-09-22")
 
 
-def test_select_endpoint_reuses_existing_draft_without_queuing(monkeypatch, sqlite_session_factory, api_db):
+def test_select_endpoint_queues_update_for_existing_draft(monkeypatch, sqlite_session_factory, api_db):
     monkeypatch.setattr(main, "SessionLocal", sqlite_session_factory)
     episode = Episode(episode_date=EPISODE_DATE, status="draft")
     api_db.add(episode)
     api_db.commit()
-    mock_delay = MagicMock()
+    mock_delay = MagicMock(return_value=MagicMock(id="fake-task-id"))
     monkeypatch.setattr(run_daily_processing, "delay", mock_delay)
 
     result = main.trigger_ranking_selection(episode_date="2026-09-22")
 
-    assert result == {
-        "episode_id": episode.id,
-        "episode_date": "2026-09-22",
-        "created": False,
-        "reason": "existing_draft_reused",
-    }
-    mock_delay.assert_not_called()
+    assert result == {"task_id": "fake-task-id", "status": "queued"}
+    mock_delay.assert_called_once_with("2026-09-22")
 
 
 def test_select_endpoint_rejected_returns_409(monkeypatch, sqlite_session_factory, api_db):

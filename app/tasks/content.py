@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from app.content.briefing.loader import load_corroborating
 from app.content.script_generator import generate_script
 from app.content.video_composer import get_audio_duration_seconds
 from app.content.voice_generator import synthesize_voice
@@ -43,6 +44,16 @@ def mark_content_failed(db, content: StoryContent, stage: str, exc: Exception) -
     print(f"[content] {stage} failed for story {content.story_id}: {exc}")
 
 
+def _persist_briefing_meta(content: StoryContent, briefing: dict | None) -> None:
+    if not briefing:
+        return
+    content.script_word_count = briefing.get("word_count")
+    content.script_sentence_count = briefing.get("sentence_count")
+    content.script_quality_status = briefing.get("quality_status")
+    content.script_generation_reason = briefing.get("reason")
+    content.script_meta = json.dumps(briefing.get("meta"), default=str)
+
+
 def ensure_script_and_voice(db, story: NewsItem, content: StoryContent) -> bool:
     """
     Script, then voice/audio/caption-timing -- the real prerequisite the
@@ -64,7 +75,25 @@ def ensure_script_and_voice(db, story: NewsItem, content: StoryContent) -> bool:
     """
     if not content.script_text:
         try:
-            script = generate_script(title=story.title, raw_summary=story.raw_summary, raw_content=story.raw_content)
+            kwargs = {}
+            corroborating = load_corroborating(db, story)
+            if corroborating:
+                kwargs["corroborating"] = corroborating
+            script = generate_script(
+                title=story.title, raw_summary=story.raw_summary, raw_content=story.raw_content, **kwargs
+            )
+            briefing = script.get("briefing")
+            _persist_briefing_meta(content, briefing)
+            if not script["script_text"]:
+                # Too thin to brief: never pad it. Left for a manual swap (QA flags it).
+                content.headline = script["headline"]
+                content.status = "failed"
+                content.error_message = "[script] insufficient for briefing: " + (
+                    (briefing or {}).get("reason") or "no usable source text"
+                )
+                db.commit()
+                print(f"[content] story {story.id} insufficient for briefing")
+                return False
             content.headline = script["headline"]
             content.summary = script["summary"]
             content.script_text = script["script_text"]

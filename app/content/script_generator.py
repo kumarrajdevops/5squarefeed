@@ -100,40 +100,48 @@ def build_summary(
     return " ".join(sentences[:max_sentences])
 
 
-def generate_script(title: str, raw_summary: str | None, raw_content: str | None = None) -> dict:
+def generate_script(
+    title: str,
+    raw_summary: str | None,
+    raw_content: str | None = None,
+    *,
+    corroborating: list | None = None,
+) -> dict:
     """
-    Deterministic, template-based script generation -- no LLM call,
-    no API key. Same "explainable, data-driven" pattern as the
-    AI-relevance filter and dedup engine elsewhere in this codebase.
+    Deterministic, source-grounded script generation -- no LLM, no network.
 
-    Reads the headline plus a deterministic summary of the story --
-    nothing more. No editorializing, no speculative commentary about
-    why a story matters or where AI is "heading next".
+    Delegates to app/content/briefing: clean the article (or the RSS teaser when
+    there is no article), judge whether it carries enough real information,
+    select the most informative verbatim sentences, and grade the result. The
+    script is the headline followed by those sentences; nothing is invented and
+    nothing is padded. A story whose source is too thin comes back with an empty
+    `script_text` (callers must treat that as "insufficient for briefing", not
+    fall back to a placeholder).
 
-    `raw_content` (the full extracted article body -- see
-    app/content/article_extractor.py, populated by
-    app/tasks/content_dedup.py as a side effect of its own TF-IDF
-    comparison, NOT fetched here) is preferred over `raw_summary` when
-    present: it's the real article's own opening, not RSS's often
-    thin/truncated/promotional excerpt. A non-empty value is already
-    guaranteed to have cleared article_extractor.py's own
-    MIN_CONTENT_CHARS gate before ever being persisted, so no further
-    quality check is needed here -- just presence. Falls back to
-    raw_summary exactly as before when raw_content is absent (fetch
-    never attempted, or failed) -- this function never triggers a
-    fetch of its own; it only consumes whatever the daily pipeline
-    already produced.
+    `raw_content` (extracted by app/content/article_extractor.py during the daily
+    content-dedup step, never fetched here) is preferred over `raw_summary` when it
+    holds a real body. `corroborating` is an optional list of
+    briefing.pipeline.Corroborating (same-day coverage of the same story by other
+    outlets), used only when the primary source is thin.
+
+    Returns headline, summary (the body without the headline), script_text, and a
+    `briefing` dict (sufficiency, quality, provenance, counts) for persistence.
     """
+    from app.content.briefing.pipeline import compose_briefing
 
     headline = clean_text(title).strip()
-    source_text = raw_content if raw_content and raw_content.strip() else raw_summary
-    summary = build_summary(source_text)
-
-    script_text = f"{headline}. {summary}"
-    script_text = re.sub(r"\s+", " ", script_text).strip()
-
+    result = compose_briefing(headline, raw_summary, raw_content, corroborating or None)
+    quality = result.quality
     return {
         "headline": headline,
-        "summary": summary,
-        "script_text": script_text,
+        "summary": result.body,
+        "script_text": result.script_text,
+        "briefing": {
+            "sufficiency": result.sufficiency.status,
+            "quality_status": quality.status if quality else None,
+            "word_count": quality.words if quality and result.script_text else 0,
+            "sentence_count": quality.sentences if quality and result.script_text else 0,
+            "reason": result.generation_reason(),
+            "meta": result.meta(),
+        },
     }

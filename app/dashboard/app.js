@@ -1,5 +1,21 @@
 const API = "/api/v1";
 
+function scriptQualityBadge(s) {
+  // Only surfaces what needs a look: an insufficient/thin source or a script graded review/fail.
+  let label = null, cls = "warn";
+  const detail = (s.sufficiency_detail && s.sufficiency_detail.reason) || s.script_generation_reason || "";
+  if (s.source_sufficiency === "insufficient" || s.script_quality_status === "fail") {
+    label = "insufficient source"; cls = "fail";
+  } else if (s.script_quality_status === "review") {
+    label = "script: review";
+  } else if (s.source_sufficiency === "thin") {
+    label = "thin source";
+  }
+  if (!label) return "";
+  const words = s.script_word_count ? ` (${s.script_word_count} words)` : "";
+  return `<span class="pill ${cls}" title="${escapeAttr(detail + words)}">${label}</span>`;
+}
+
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str == null ? "" : str;
@@ -337,6 +353,16 @@ function wireCollectButton() {
 
 let processCollapseTimer = null;
 
+function formatRankUpdate(r) {
+  const added = (r.added_primary ?? 0) + (r.added_backup ?? 0);
+  const totals = `now ${r.primary_total ?? "?"} primary, ${r.backup_total ?? "?"} backup`;
+  if (added === 0) {
+    return `episode #${r.episode_id} already up to date -- kept all ${r.kept_stories ?? "?"} first-run stories, nothing new to add (${totals}).`;
+  }
+  return `episode #${r.episode_id} updated -- kept ${r.kept_stories ?? "?"} first-run stories, ` +
+    `added ${r.added_primary ?? 0} primary + ${r.added_backup ?? 0} backup (${totals}).`;
+}
+
 function formatProcessSummary(result) {
   const c = result.classify || {};
   const d = result.dedup || {};
@@ -353,6 +379,8 @@ function formatProcessSummary(result) {
 
   if (r.created) {
     lines.push(`Ranking: created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup`);
+  } else if (r.updated) {
+    lines.push(`Ranking: ${formatRankUpdate(r)}`);
   } else {
     lines.push(`Ranking: no new episode (${escapeHtml(r.reason || "unknown")}, episode #${r.episode_id ?? "?"})`);
   }
@@ -384,7 +412,7 @@ function wireProcessButton() {
     const stopLoading = () => {
       clearInterval(timerInterval);
       btn.disabled = false;
-      btn.textContent = "Process Episode";
+      btn.textContent = "Process / Update Episode (all steps)";
     };
 
     let queued;
@@ -550,7 +578,7 @@ async function renderEpisodeList() {
       <div class="panel collect-panel">
         <div class="collect-row">
           <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
-          <button class="btn" id="process-btn" type="button">Process Episode (all steps)</button>
+          <button class="btn" id="process-btn" type="button">Process / Update Episode (all steps)</button>
         </div>
         <p id="collect-result" class="collect-result"></p>
         <p id="process-result" class="collect-result"></p>
@@ -561,7 +589,7 @@ async function renderEpisodeList() {
           <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
           <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
           <button class="btn btn-small" id="verify-btn" type="button">4. Verify</button>
-          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select</button>
+          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select / Update</button>
         </div>
         <p id="classify-result" class="collect-result"></p>
         <p id="dedup-stage-result" class="collect-result"></p>
@@ -604,7 +632,9 @@ async function renderEpisodeList() {
       btnId: "rank-btn", resultId: "rank-result", path: "/processing/rank",
       formatResult: (r) => r.created
         ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
-        : `No new episode (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
+        : r.updated
+          ? `${formatRankUpdate(r)}`
+          : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
       onSuccess: () => renderEpisodeList(),
     });
     wireStageButton({
@@ -678,7 +708,15 @@ async function renderEpisodeStudio(episodeId) {
     return;
   }
 
-  renderStudioLayout(currentEpisode);
+  // The storyboard report is a convenience panel -- never block the page on it.
+  let storyboardReport = null;
+  try {
+    storyboardReport = await apiGet(`/episodes/${episodeId}/storyboard`);
+  } catch (err) {
+    storyboardReport = null;
+  }
+
+  renderStudioLayout(currentEpisode, storyboardReport);
 }
 
 function qaIsStale(ep) {
@@ -737,7 +775,8 @@ function renderPipelineChartHtml(pipeline) {
   `;
 }
 
-function renderStudioLayout(ep) {
+function renderStudioLayout(ep, storyboardReport) {
+  const sbRunning = !!storyboardReport && storyboardReport.status === "running";
   const producing = ep.video_status === "producing";
   const qaStale = qaIsStale(ep);
   const pubs = ep.publications || {};
@@ -783,7 +822,8 @@ function renderStudioLayout(ep) {
         ${publishLinksHtml}
       </div>
       <div class="studio-actions">
-        <button class="btn" id="btn-produce" type="button" ${producing ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
+        <button class="btn" id="btn-storyboard" type="button" ${producing || sbRunning ? "disabled" : ""}>${sbRunning ? "Storyboard… 0:00" : "Storyboard"}</button>
+        <button class="btn" id="btn-produce" type="button" ${producing || sbRunning ? "disabled" : ""}>${producing ? "Processing… 0:00" : "Process Episode"}</button>
         <button class="btn${qaStale ? " btn-warn" : ""}" id="btn-qa" type="button" ${producing ? "disabled" : ""}>${qaStale ? "Run QA ⚠ (stale)" : "Run QA"}</button>
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
@@ -792,6 +832,8 @@ function renderStudioLayout(ep) {
     </div>
 
     ${renderPipelineChartHtml(ep.pipeline)}
+
+    ${renderStoryboardPanelHtml(storyboardReport)}
 
     ${ep.video_url
       ? `<video class="player" id="player" controls src="${cacheBust(ep.video_url, ep.video_produced_at)}"></video>`
@@ -829,6 +871,7 @@ function renderStudioLayout(ep) {
   wireSwapCheckboxes(ep);
   wireJsonAudit(ep);
   wireHeaderButtons(ep);
+  wireStoryboardButton(ep, storyboardReport);
 }
 
 // Raw episode JSON at the bottom of the Studio view, for audit --
@@ -958,6 +1001,7 @@ function renderStoryList(listId, stories, ep, jumpable) {
         ${s.repeats_story_id
           ? `<span class="pill repeat-flagged" title="${escapeAttr(s.repeat_reason || "")}">possible repeat</span>`
           : ""}
+        ${scriptQualityBadge(s)}
       </div>
     </li>
   `).join("");
@@ -1207,6 +1251,89 @@ function startPublishPolling(ep, env, startTime) {
       // Transient fetch error -- keep polling, next tick will retry.
     }
   }, 3000);
+}
+
+// Storyboard check -- Build/reuse every primary story's storyboard and list
+// anything wrong, before the long Process render (app/tasks/episode_storyboard.py).
+function renderStoryboardPanelHtml(report) {
+  if (!report || report.status === "none") return "";
+
+  if (report.status === "running") {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p class="loading">Checking storyboards… ${report.processed || 0} of ${report.total || "?"} stories done.</p></div>`;
+  }
+
+  if (report.status === "failed") {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p class="error">Storyboard check failed: ${escapeHtml(report.error || "unknown error")}</p></div>`;
+  }
+
+  const problems = report.problems || [];
+    const summary = `${report.total} stories checked (${report.built} built, ${report.reused} reused).`;
+
+  if (problems.length === 0) {
+    return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+      <p><span class="pill pass">OK</span> ${summary} No problems found.</p></div>`;
+  }
+
+  const rows = problems.map((p) => {
+    const issues = p.issues.map((i) => `
+      <p class="sb-issue"><span class="pill ${i.severity === "error" ? "fail" : "warn"}">${i.severity === "error" ? "ERROR" : "WARN"}</span><span>
+        ${escapeHtml(i.stage)} &mdash; ${escapeHtml(i.message)}</span></p>`).join("");
+    return `<li class="sb-row"><p class="sb-name">#${p.rank}${p.backup ? " (backup)" : ""} &middot; story ${p.story_id} &mdash; ${escapeHtml(p.headline)}</p>${issues}</li>`;
+  }).join("");
+
+  return `<div class="panel storyboard-panel"><h2>Storyboard check</h2>
+    <p><span class="pill fail">${problems.length} could not be built</span> ${summary}
+      </p>
+    <ol class="sb-list">${rows}</ol></div>`;
+}
+
+function startStoryboardPolling(ep, startTime) {
+  const btn = document.getElementById("btn-storyboard");
+  const produceBtn = document.getElementById("btn-produce");
+  const qaBtn = document.getElementById("btn-qa");
+  if (!btn) return;
+
+  btn.disabled = true;
+  if (produceBtn) produceBtn.disabled = true;
+  if (qaBtn) qaBtn.disabled = true;
+
+  const tick = () => { btn.textContent = `Storyboard… ${formatElapsed(Date.now() - startTime)}`; };
+  tick();
+  const timerInterval = setInterval(tick, 1000);
+
+  const pollInterval = setInterval(async () => {
+    try {
+      const fresh = await apiGet(`/episodes/${ep.episode_id}/storyboard`);
+      if (fresh.status !== "running") {
+        clearInterval(timerInterval);
+        clearInterval(pollInterval);
+        await renderEpisodeStudio(ep.episode_id);
+      }
+    } catch (err) {
+      // Transient fetch error -- keep polling, next tick will retry.
+    }
+  }, 3000);
+}
+
+function wireStoryboardButton(ep, report) {
+  const btn = document.getElementById("btn-storyboard");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    const startTime = Date.now();
+    try {
+      await apiPost(`/episodes/${ep.episode_id}/storyboard`);
+      startStoryboardPolling(ep, startTime);
+    } catch (err) {
+      alert("Failed to start storyboard check: " + err.message);
+    }
+  });
+
+  if (report && report.status === "running") {
+    startStoryboardPolling(ep, report.started_at ? new Date(report.started_at).getTime() : Date.now());
+  }
 }
 
 function wireHeaderButtons(ep) {

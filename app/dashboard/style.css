@@ -669,3 +669,11 @@ li.qa-row:first-child { border-top: none; padding-top: 0; }
 .edit-status { font-size: 13px; color: var(--text-muted); }
 
 #edit-preview video, #edit-preview audio { width: 100%; margin-top: 6px; }
+
+/* Storyboard check panel */
+ol.sb-list { list-style: none; margin: 12px 0 0; padding: 0; }
+li.sb-row { padding: 10px 0; border-top: 1px solid var(--border); }
+li.sb-row:first-child { border-top: none; padding-top: 0; }
+.sb-name { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.sb-issue { font-size: 13px; color: var(--text-muted); margin: 2px 0; display: flex; gap: 8px; align-items: baseline; }
+.sb-issue .pill { flex: none; }

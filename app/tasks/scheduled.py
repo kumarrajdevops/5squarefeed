@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 
 from app.dates import target_collection_date
 from app.db import SessionLocal
+from app.models import Episode
 from app.tasks.classify import classify_new_raw_items
 from app.tasks.content_dedup import enrich_and_dedup_by_content
 from app.tasks.dedup import deduplicate_new_stories
@@ -64,12 +65,23 @@ def run_daily_processing(target_date_iso: str | None = None) -> dict:
 
     episode_id = ranking_result.get("episode_id")
 
-    if episode_id is None:
-        # Ranking declined to create an episode (an existing one
-        # already covers this episode_date, or a creation race was
-        # lost -- see _run_ranking_selection). Nothing to produce/QA.
+    if not (ranking_result.get("created") or ranking_result.get("updated")):
+        # Ranking neither created nor updated an episode (an
+        # approved/rejected/published one already covers this date, a
+        # creation race was lost, or there are several -- see
+        # _run_ranking_selection). Nothing to produce/QA, and an
+        # approved episode must never be re-produced from here.
         print(f"[scheduled] Daily processing completed without a new episode: {result}")
         return result
+
+    if ranking_result.get("updated"):
+        added = ranking_result.get("added_primary", 0) + ranking_result.get("added_backup", 0)
+        with SessionLocal() as db:
+            video_status = db.get(Episode, episode_id).video_status
+        if added == 0 and video_status == "ready":
+            result["produce_status"] = "unchanged"
+            print(f"[scheduled] Draft episode {episode_id} unchanged and already produced: {result}")
+            return result
 
     produce_result = produce_episode_video(episode_id)
     qa_result = run_episode_qa(episode_id)

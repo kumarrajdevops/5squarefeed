@@ -3,8 +3,24 @@ from datetime import date
 from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.filters.dedup import find_duplicate_match
-from app.models import NewsItem, StoryState
+from app.models import Episode, EpisodeStory, NewsItem, StoryState
 from app.worker.celery_app import celery_app
+
+
+def pinned_story_ids(db, target_date) -> set[int]:
+    """
+    Story ids already selected (primary or backup) in the not-yet-
+    approved episode for target_date. A re-run of dedup must never
+    demote one of these to "duplicate of a newer story": the first
+    run's selection sticks until the episode is approved.
+    """
+    return {
+        row[0]
+        for row in db.query(EpisodeStory.story_id)
+        .join(Episode, Episode.id == EpisodeStory.episode_id)
+        .filter(Episode.episode_date == target_date)
+        .all()
+    }
 
 
 def deduplicate_new_stories(db, target_date) -> dict:
@@ -49,6 +65,12 @@ def deduplicate_new_stories(db, target_date) -> dict:
         .all()
     )
 
+    # Stories already in this date's episode go first and are never
+    # themselves marked duplicates, so newer stories can only match
+    # against them -- see pinned_story_ids().
+    pinned = pinned_story_ids(db, target_date)
+    rows = [r for r in rows if r[0].id in pinned] + [r for r in rows if r[0].id not in pinned]
+
     # Stories confirmed canonical during this pass -- plain NewsItem
     # objects, since find_duplicate_match only needs .id/.title/
     # .published_at, all of which live on NewsItem.
@@ -57,6 +79,10 @@ def deduplicate_new_stories(db, target_date) -> dict:
     for item, state in rows:
 
         checked += 1
+
+        if item.id in pinned:
+            canonical_pool.append(item)
+            continue
 
         match, reason = find_duplicate_match(
             candidate_title=item.title,

@@ -138,6 +138,108 @@ NEWS_SOURCES = [
         # contribute a story most days, not a broken feed.
         "enabled": True,
     },
+    # Weekend-active sources, added 2026-10-05 after Ep10 (Sat) and Ep11
+    # (Sun) came up short (14 and 16 stories): the weekday outlets above
+    # publish almost nothing on Sat/Sun and the ingestion window is the
+    # IST calendar day. All verified HTTP 200, valid feed, items dated
+    # on Sat/Sun in the latest entries.
+    {
+        "name": "The Decoder",
+        "url": "https://the-decoder.com/feed/",
+        "source_type": "rss",
+        # AI-only news site; 10 of its latest 10 entries fell on Sat/Sun.
+        "enabled": True,
+    },
+    {
+        "name": "The Guardian AI",
+        "url": "https://www.theguardian.com/technology/artificialintelligenceai/rss",
+        "source_type": "rss",
+        # Guardian AI topic feed; 9 of 20 entries on Sat/Sun.
+        "enabled": True,
+    },
+    {
+        "name": "Latent Space",
+        "url": "https://www.latent.space/feed",
+        "source_type": "rss",
+        # AI engineering newsletter/podcast; latest entry Sat 2026-10-03.
+        "enabled": True,
+    },
+    {
+        "name": "Zvi Mowshowitz (Don't Worry About the Vase)",
+        "url": "https://thezvi.substack.com/feed",
+        "source_type": "rss",
+        # Weekly AI roundup posts, frequently on weekends.
+        "enabled": True,
+    },
+    {
+        "name": "Last Week in AI",
+        "url": "https://lastweekin.ai/feed",
+        "source_type": "rss",
+        # Weekly AI news digest, latest entry Sat 2026-10-03.
+        "enabled": True,
+    },
+    {
+        "name": "Futurism",
+        "url": "https://futurism.com/feed",
+        "source_type": "rss",
+        # General tech/science, ~40 of 92 entries on Sat/Sun. Broader
+        # than AI-only, so the deterministic AI-relevance filter does
+        # the narrowing (same pattern as Microsoft/Google Research).
+        "enabled": True,
+    },
+    # Second round (2026-10-05): after the first six, the Oct 4 pool was
+    # 28 (needs 30). These are broad tech outlets that publish 7 days a
+    # week; the AI-relevance filter narrows them. Probed 2026-10-05:
+    # in-window items on Sun Oct 4 / Sat Oct 3 with an AI keyword.
+    {
+        "name": "Tom's Hardware",
+        "url": "https://www.tomshardware.com/feeds/all",
+        "source_type": "rss",
+        # 16 items Oct 4 (7 AI-ish), 15 Oct 3 (6 AI-ish).
+        "enabled": True,
+    },
+    {
+        "name": "The Next Web",
+        "url": "https://thenextweb.com/feed",
+        "source_type": "rss",
+        # 9 items Oct 4 (4 AI-ish).
+        "enabled": True,
+    },
+    {
+        "name": "TechRadar",
+        "url": "https://www.techradar.com/rss",
+        "source_type": "rss",
+        # 30 items Oct 4 (4 AI-ish), 13 Oct 3.
+        "enabled": True,
+    },
+    {
+        "name": "Business Insider Tech",
+        "url": "https://www.businessinsider.com/rss",
+        "source_type": "rss",
+        # 17 items Oct 4 (3 AI-ish).
+        "enabled": True,
+    },
+    {
+        "name": "Engadget",
+        "url": "https://www.engadget.com/rss.xml",
+        "source_type": "rss",
+        # 8 items Oct 4 (3 AI-ish); 18 of 20 entries on Sundays.
+        "enabled": True,
+    },
+    {
+        "name": "SiliconANGLE AI",
+        "url": "https://siliconangle.com/category/ai/feed/",
+        "source_type": "rss",
+        # AI category; 1 item Oct 4, 4 Oct 3.
+        "enabled": True,
+    },
+    {
+        "name": "Towards Data Science",
+        "url": "https://towardsdatascience.com/feed",
+        "source_type": "rss",
+        # 2 items Oct 4, 2 Oct 3.
+        "enabled": True,
+    },
 ]
 
 # Candidates evaluated and deliberately NOT added, so a future pass

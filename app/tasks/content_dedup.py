@@ -1,8 +1,11 @@
 import hashlib
+import json
 import time
 from datetime import date
 
 from app.content.article_extractor import fetch_full_article_text
+from app.content.briefing.loader import load_corroborating
+from app.content.briefing.pipeline import compose_briefing
 from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.filters.dedup import TIME_WINDOW_HOURS
@@ -13,6 +16,7 @@ from app.filters.content_similarity import (
     get_comparable_text,
 )
 from app.models import EpisodeStory, NewsItem, StoryState
+from app.tasks.dedup import pinned_story_ids
 from app.worker.celery_app import celery_app
 
 
@@ -23,6 +27,45 @@ from app.worker.celery_app import celery_app
 # story). At ~45-60 stories/day this adds well under a minute of total
 # wall-clock time to a task that already runs unattended overnight.
 REQUEST_DELAY_SECONDS = 1.0
+
+
+RETRYABLE_FETCH_STATUSES = ("fetch_error", "empty_extraction")
+
+
+def _detail(state) -> dict:
+    try:
+        return json.loads(state.sufficiency_detail) if state.sufficiency_detail else {}
+    except ValueError:
+        return {}
+
+
+def assess_source_sufficiency(db, item, state) -> str:
+    """Can this story support a source-grounded briefing? Runs the same
+    deterministic composer the script stage uses, with same-day sibling
+    coverage as corroboration, so a story is only called sufficient when a
+    script would really be produced. Stored on StoryState; ranking excludes
+    "insufficient" stories. No network, no LLM."""
+    from app.content.briefing.textutil import word_count
+
+    result = compose_briefing(
+        item.title, item.raw_summary, item.raw_content, corroborating=load_corroborating(db, item)
+    )
+    status = result.sufficiency.status if result.sufficiency else "insufficient"
+    if not result.script_text:
+        status = "insufficient"
+    detail = {**_detail(state), **(result.sufficiency.summary() if result.sufficiency else {})}
+    detail.update(
+        {
+            "status": status,
+            "reason": result.generation_reason(),
+            "quality_status": result.quality.status if result.quality else None,
+            "corroborated": result.corroborated,
+        }
+    )
+    state.source_sufficiency = status
+    state.sufficiency_detail = json.dumps(detail, default=str)
+    state.source_word_count = word_count(item.raw_content or item.raw_summary or "")
+    return status
 
 
 def _content_hash(text: str) -> str:
@@ -72,6 +115,7 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
     fetch_fallback = 0
     content_duplicates_found = 0
     historical_repeats_found = 0
+    insufficient_found = 0
 
     # -------------------------------------------------
     # Every story_id ever selected as "primary" in a past episode --
@@ -114,24 +158,38 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
 
     candidates = candidates_query.order_by(NewsItem.published_at.asc()).all()
 
+    # Stories already in this date's episode (backups; primaries are
+    # excluded above) go first and are never marked duplicates -- the
+    # first run's selection sticks until approval.
+    pinned = pinned_story_ids(db, target_date)
+    candidates = [c for c in candidates if c[0].id in pinned] + [c for c in candidates if c[0].id not in pinned]
+
     # -------------------------------------------------
     # Step 1: fetch full article text for anything not already
-    # attempted (content_fetch_status IS NULL -- a prior failure still
-    # counts as "attempted", so a permanently-blocked site is never
-    # re-fetched on every run).
+    # attempted (content_fetch_status IS NULL). A prior failure counts as
+    # "attempted" too, except fetch_error/empty_extraction, which get exactly
+    # one more try, so a permanently-blocked site is never hammered.
     # -------------------------------------------------
 
     for item, state in candidates:
-        if state.content_fetch_status is not None:
+        refetch = (
+            state.content_fetch_status in RETRYABLE_FETCH_STATUSES
+            and not _detail(state).get("refetched")
+        )
+        if state.content_fetch_status is not None and not refetch:
             continue
 
         fetch_attempted += 1
         result = fetch_full_article_text(item.canonical_url)
         state.content_fetch_status = result.status
+        if refetch:
+            # One extra attempt per story, ever (a blocked site is not hammered).
+            state.sufficiency_detail = json.dumps({**_detail(state), "refetched": True})
 
         if result.text:
             item.raw_content = result.text
             item.content_hash = _content_hash(result.text)
+            state.content_extraction_method = result.method
             fetch_success += 1
         else:
             fetch_fallback += 1
@@ -164,6 +222,10 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
 
         for local_pos, story_idx in enumerate(comparable_indices):
             item, state = remaining[story_idx]
+
+            if item.id in pinned:
+                canonical_pool_positions.append(local_pos)
+                continue
 
             best_score = 0.0
             best_match_item = None
@@ -200,6 +262,18 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
                 )
             else:
                 canonical_pool_positions.append(local_pos)
+
+    db.commit()
+
+    # -------------------------------------------------
+    # Step 2b: source sufficiency. After same-day dedup, so sibling
+    # coverage can corroborate a thin story. Assessed once per story.
+    # -------------------------------------------------
+
+    for item, state in remaining:
+        if state.canonical_story_id is None and state.source_sufficiency is None:
+            if assess_source_sufficiency(db, item, state) == "insufficient":
+                insufficient_found += 1
 
     db.commit()
 
@@ -295,6 +369,7 @@ def enrich_and_dedup_by_content(db, target_date) -> dict:
         "fetch_fallback": fetch_fallback,
         "content_duplicates_found": content_duplicates_found,
         "historical_repeats_found": historical_repeats_found,
+        "insufficient_found": insufficient_found,
     }
 
     print(f"[content-dedup] Completed: {result}")
