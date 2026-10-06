@@ -3,6 +3,8 @@ from datetime import date
 from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.filters.ai_relevance import calculate_ai_relevance
+from app.filters.classification_rules import classify
+from app.filters.review import AI_CANDIDATE, AI_REVIEW, RELEVANCE_BY_DISPOSITION
 from app.models import NewsItem, StoryState
 from app.worker.celery_app import celery_app
 
@@ -16,6 +18,11 @@ def classify_new_raw_items(db, target_date) -> dict:
     run inline during ingestion; it moves here so raw collection never
     computes anything editorial (see app/models.py's NewsItem vs
     StoryState split).
+
+    The decision comes from app/filters/classification_rules.py:
+    candidate -> ai_candidate, review -> ai_review (held out of every
+    pool until an editor promotes it), reject -> not_ai. The structured
+    result (rules version, disposition, reason) is stored on the row.
 
     Idempotent: only touches raw.news_items rows that don't already
     have a StoryState row, so calling this again for a target_date
@@ -32,28 +39,37 @@ def classify_new_raw_items(db, target_date) -> dict:
 
     classified = 0
     ai_candidates = 0
+    ai_review = 0
 
     for item in unclassified:
-        ai_relevance, ai_score, filter_reason = calculate_ai_relevance(
-            title=item.title,
-            summary=item.raw_summary,
-        )
+        verdict = classify(title=item.title, summary=item.raw_summary)
+        ai_relevance = RELEVANCE_BY_DISPOSITION[verdict.disposition]
+
+        # The keyword scorer's output is stored verbatim; it only feeds ranking and does not
+        # affect the classification above.
+        _, ai_score, _ = calculate_ai_relevance(title=item.title, summary=item.raw_summary)
 
         db.add(
             StoryState(
                 id=item.id,
                 ai_relevance=ai_relevance,
                 ai_relevance_score=ai_score,
-                filter_reason=filter_reason,
+                filter_reason=verdict.reason,
+                classifier_version=verdict.version,
+                classifier_disposition=verdict.disposition,
+                classifier_ai_relatedness=verdict.ai_relatedness,
+                classifier_content_flag=verdict.content_flag,
             )
         )
         classified += 1
-        if ai_relevance == "ai_candidate":
+        if ai_relevance == AI_CANDIDATE:
             ai_candidates += 1
+        elif ai_relevance == AI_REVIEW:
+            ai_review += 1
 
     db.commit()
 
-    result = {"classified": classified, "ai_candidates": ai_candidates}
+    result = {"classified": classified, "ai_candidates": ai_candidates, "ai_review": ai_review}
     print(f"[classify] Completed: {result}")
     return result
 

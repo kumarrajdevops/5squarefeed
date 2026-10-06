@@ -1,5 +1,6 @@
 import json
 from datetime import date, datetime, timezone
+from datetime import date as date_cls
 from pathlib import Path
 
 from celery.result import AsyncResult
@@ -12,6 +13,7 @@ from sqlalchemy import select, text
 from app.config import settings
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
+from app.filters.review import AI_REVIEW, ReviewError, apply_review_decision
 from app.models import CollectionRun, Episode, EpisodePublication, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
 from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
@@ -119,6 +121,10 @@ class StoryContentUpdate(BaseModel):
     summary: str | None = None
     script_text: str | None = None
     support_text: str | None = None  # "" clears the override (back to automatic)
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str  # "promote" | "reject"
 
 
 class ReorderRequest(BaseModel):
@@ -1126,6 +1132,7 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
     processed_status = "done" if classified else "pending"
 
     ai_candidates = sum(1 for s in story_states if s.ai_relevance == "ai_candidate")
+    awaiting_review = sum(1 for s in story_states if s.ai_relevance == AI_REVIEW)
     dup_count = sum(1 for s in story_states if s.canonical_story_id is not None)
     repeat_count = sum(1 for s in story_states if s.repeats_story_id is not None)
     fetched_count = sum(1 for s in story_states if s.content_fetch_status is not None)
@@ -1165,7 +1172,11 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {"stage": "collect", "label": "Collect", "status": collect_status, "detail": collect_detail},
         {
             "stage": "classify", "label": "Classify", "status": processed_status,
-            "detail": f"{classified} classified, {ai_candidates} AI candidates" if classified else "not yet run",
+            "detail": (
+                f"{classified} classified, {ai_candidates} AI candidates"
+                + (f", {awaiting_review} to review" if awaiting_review else "")
+                if classified else "not yet run"
+            ),
         },
         {
             "stage": "dedup", "label": "Dedup", "status": processed_status,
@@ -1348,6 +1359,66 @@ def list_stories(limit: int = 30):
             }
             for item, state in rows
         ]
+
+
+@app.get("/api/v1/review-queue")
+def list_review_queue(date: str | None = None):
+    """
+    Stories the classification gate could not decide (ai_relevance ==
+    "ai_review") for one collection day, awaiting an editor's promote or
+    reject. Defaults to the current collection day.
+    """
+    _validate_date_param(date, "date")
+    day = date_cls.fromisoformat(date) if date else target_collection_date()
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(NewsItem, StoryState)
+            .join(StoryState, StoryState.id == NewsItem.id)
+            .filter(NewsItem.collection_date == day, StoryState.ai_relevance == AI_REVIEW)
+            .order_by(NewsItem.published_at.desc())
+            .all()
+        )
+        return {
+            "date": day.isoformat(),
+            "count": len(rows),
+            "stories": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "summary": item.raw_summary,
+                    "url": item.canonical_url,
+                    "source_name": item.source_name,
+                    "published_at": item.published_at,
+                    "reason": state.filter_reason,
+                    "ai_relatedness": state.classifier_ai_relatedness,
+                    "content_flag": state.classifier_content_flag,
+                    "classifier_version": state.classifier_version,
+                }
+                for item, state in rows
+            ],
+        }
+
+
+@app.post("/api/v1/stories/{story_id}/review")
+def review_story(story_id: int, body: ReviewDecisionRequest):
+    """
+    Editor decision on a story in the review lane: "promote" makes it an
+    ai_candidate (eligible for dedup/verification/ranking on the next
+    processing run), "reject" makes it not_ai. Only valid while the
+    story is still ai_review.
+    """
+    with SessionLocal() as db:
+        try:
+            state = apply_review_decision(db, story_id, body.decision)
+        except ReviewError as err:
+            raise HTTPException(status_code=err.status_code, detail=str(err))
+        return {
+            "id": state.id,
+            "ai_relevance": state.ai_relevance,
+            "review_decision": state.review_decision,
+            "reviewed_at": state.reviewed_at,
+        }
 
 
 @app.post("/api/v1/stories/{story_id}/produce")

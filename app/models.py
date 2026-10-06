@@ -169,6 +169,18 @@ class StoryState(Base):
     ai_relevance_score: Mapped[float | None] = mapped_column(nullable=True)
     filter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Structured result of the classification gate (app/filters/classification_rules.py).
+    # NULL on rows classified before the gate existed. ai_relevance is the live state
+    # ("ai_candidate" | "ai_review" | "not_ai"); classifier_disposition is what the
+    # classifier itself said, so an editor override stays distinguishable from it.
+    classifier_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    classifier_disposition: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    classifier_ai_relatedness: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    classifier_content_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Editor override of an "ai_review" story: "promoted" | "rejected".
+    review_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # NULL = canonical (unique, or representative of a duplicate
     # group). Non-null = duplicate of the editorial.stories row with
     # that id. Rows are never deleted; just excluded downstream.

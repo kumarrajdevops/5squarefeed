@@ -106,6 +106,39 @@ def compute_momentum_score(duplicate_count: int, cap: int = MOMENTUM_CAP) -> flo
     return max(0.0, min(1.0, duplicate_count / cap))
 
 
+# Value of the AI-relevance component for a story the rules classifier has certified as AI
+# (a rules "candidate", or a review story an editor promoted). The component measures how
+# AI-relevant a story is; for these stories that is settled by the classification, so it is the
+# full value rather than a number inferred from the legacy keyword list.
+CLASSIFIED_AI_RELEVANCE = 1.0
+
+
+def ai_relevance_input(
+    ai_relevance_score: float | None,
+    classifier_version: str | None = None,
+    classifier_disposition: str | None = None,
+    review_decision: str | None = None,
+) -> float | None:
+    """
+    The AI-relevance input for compute_total_score.
+
+    Rows with a persisted classifier result (classifier_version set) are ranked on that result,
+    not on ai_relevance_score, which is the legacy keyword scorer's output and misses AI terms the
+    classifier knows (ChatGPT, Copilot, Apple Intelligence...). A story is certified AI when the
+    classifier said "candidate", or when it said "review" and an editor promoted it. Rows
+    classified before the classifier existed have no classifier_version and keep using
+    ai_relevance_score unchanged.
+
+    Which stories are eligible for ranking at all is decided elsewhere (ai_relevance ==
+    "ai_candidate"); this only chooses the value of the AI-relevance component.
+    """
+    if classifier_version is None:
+        return ai_relevance_score
+    if classifier_disposition == "candidate" or review_decision == "promoted":
+        return CLASSIFIED_AI_RELEVANCE
+    return ai_relevance_score
+
+
 def compute_total_score(
     published_at: datetime | None,
     source_name: str,

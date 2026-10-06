@@ -179,3 +179,18 @@ def test_rejected_and_publish_failed_are_hard_failures(db_session):
     publish = _stage(stages, "publish")
     assert publish["status"] == "failed"
     assert publish["detail"] == "quota exceeded"
+
+
+def test_classify_detail_reports_stories_awaiting_review(db_session):
+    episode = _make_episode(db_session)
+    a = _make_news_item(db_session, "a")
+    b = _make_news_item(db_session, "b")
+    c = _make_news_item(db_session, "c")
+    db_session.add(StoryState(id=a.id, ai_relevance="ai_candidate"))
+    db_session.add(StoryState(id=b.id, ai_relevance="ai_review"))
+    db_session.add(StoryState(id=c.id, ai_relevance="not_ai"))
+    db_session.commit()
+
+    stages = _compute_pipeline_stages(db_session, episode, primary_count=0, backup_count=0)
+
+    assert _stage(stages, "classify")["detail"] == "3 classified, 1 AI candidates, 1 to review"

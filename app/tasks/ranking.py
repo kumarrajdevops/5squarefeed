@@ -7,7 +7,7 @@ from app.config import settings
 from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.models import Episode, EpisodeStory, NewsItem, StoryState
-from app.ranking.engine import compute_total_score
+from app.ranking.engine import ai_relevance_input, compute_total_score
 from app.worker.celery_app import celery_app
 
 
@@ -186,7 +186,12 @@ def _score_and_select_top_stories(
         score, reason = compute_total_score(
             published_at=item.published_at,
             source_name=item.source_name,
-            ai_relevance_score=state.ai_relevance_score,
+            ai_relevance_score=ai_relevance_input(
+                state.ai_relevance_score,
+                classifier_version=state.classifier_version,
+                classifier_disposition=state.classifier_disposition,
+                review_decision=state.review_decision,
+            ),
             duplicate_count=duplicate_count,
             now=now,
             window_hours=settings.news_window_hours,

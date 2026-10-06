@@ -206,6 +206,12 @@ async function init() {
     appEnv = null; // Fail closed on the dashboard too -- unknown env hides the button.
   }
 
+  const params = new URLSearchParams(location.search);
+  if (params.has("review")) {
+    await renderReviewQueue(params.get("review"));
+    return;
+  }
+
   const episodeId = getEpisodeIdFromUrl();
   if (episodeId) {
     await renderEpisodeStudio(episodeId);
@@ -371,7 +377,7 @@ function formatProcessSummary(result) {
   const r = result.ranking || {};
 
   const lines = [
-    `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates`,
+    `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates, ${c.ai_review ?? "?"} to review`,
     `Dedup: ${d.duplicates_found ?? "?"} duplicates found (of ${d.checked ?? "?"} checked)`,
     `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates, ${cd.historical_repeats_found ?? "?"} historical repeats`,
     `Verification: ${v.verified ?? "?"} verified / ${v.unverified ?? "?"} unverified`,
@@ -559,6 +565,78 @@ function wireStageButton({ btnId, resultId, path, formatResult, onSuccess }) {
 }
 
 // ---------------------------------------------------------
+// Review queue -- stories the classification gate could not decide
+// (ai_relevance "ai_review"). Held out of every pool until the editor
+// promotes (-> ai_candidate, picked up by the next processing run) or
+// rejects them.
+// ---------------------------------------------------------
+
+async function renderReviewQueue(date) {
+  app.innerHTML = '<p class="loading">Loading review queue…</p>';
+
+  let queue;
+  try {
+    queue = await apiGet("/review-queue" + (date ? `?date=${encodeURIComponent(date)}` : ""));
+  } catch (err) {
+    app.innerHTML = `<p class="error">Failed to load review queue: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  const cards = queue.stories.map((s) => `
+    <div class="panel review-card" data-id="${s.id}">
+      <h3>${escapeHtml(s.title)}</h3>
+      <p class="review-meta">
+        ${escapeHtml(s.source_name || "")}
+        ${s.url ? ` &middot; <a class="story-link" href="${escapeAttr(s.url)}" target="_blank" rel="noopener noreferrer">open source</a>` : ""}
+      </p>
+      <p class="review-summary">${escapeHtml(s.summary || "")}</p>
+      <p class="review-reason">
+        <span class="pill warn">${escapeHtml(s.reason || "review")}</span>
+        <span class="review-version">${escapeHtml(s.classifier_version || "")}</span>
+      </p>
+      <div class="review-actions">
+        <button class="btn btn-pass btn-small" type="button" data-decision="promote">Promote</button>
+        <button class="btn btn-small" type="button" data-decision="reject">Reject</button>
+        <span class="review-error error"></span>
+      </div>
+    </div>
+  `).join("");
+
+  app.innerHTML = `
+    <p><a class="btn btn-ghost" href="/dashboard/">&larr; Episodes</a></p>
+    <h1>Review queue</h1>
+    <p class="review-controls">
+      <label>Collection day <input type="date" id="review-date" value="${escapeAttr(queue.date)}"></label>
+      <span id="review-count">${queue.count} awaiting review</span>
+    </p>
+    <p class="review-help">Promote sends a story to the candidate pool (it is deduplicated, verified and ranked on the next processing run). Reject discards it.</p>
+    ${cards || '<p class="loading">Nothing to review for this day.</p>'}
+  `;
+
+  document.getElementById("review-date").addEventListener("change", (ev) => {
+    location.search = "?review=" + encodeURIComponent(ev.target.value);
+  });
+
+  app.querySelectorAll(".review-card").forEach((card) => {
+    card.querySelectorAll("button[data-decision]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const buttons = card.querySelectorAll("button");
+        buttons.forEach((b) => { b.disabled = true; });
+        try {
+          await apiPost(`/stories/${card.dataset.id}/review`, { decision: btn.dataset.decision });
+          card.remove();
+          const left = app.querySelectorAll(".review-card").length;
+          document.getElementById("review-count").textContent = `${left} awaiting review`;
+        } catch (err) {
+          card.querySelector(".review-error").textContent = err.message;
+          buttons.forEach((b) => { b.disabled = false; });
+        }
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------
 // Episode list
 // ---------------------------------------------------------
 
@@ -572,6 +650,8 @@ async function renderEpisodeList() {
     app.innerHTML = `<p class="error">Failed to load episodes: ${escapeHtml(err.message)}</p>`;
     return;
   }
+
+  const reviewLinkHtml = '<p><a class="btn" href="?review=" id="review-link">Review queue</a></p>';
 
   const collectPanelHtml = isDevEnvironment(appEnv)
     ? `
@@ -612,7 +692,7 @@ async function renderEpisodeList() {
     wireProcessButton();
     wireStageButton({
       btnId: "classify-btn", resultId: "classify-result", path: "/processing/classify",
-      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates.`,
+      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates, ${r.ai_review ?? "?"} to review.`,
     });
     wireStageButton({
       btnId: "dedup-stage-btn", resultId: "dedup-stage-result", path: "/processing/dedup",
@@ -655,7 +735,7 @@ async function renderEpisodeList() {
   };
 
   if (!episodes.length) {
-    app.innerHTML = collectPanelHtml + '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
+    app.innerHTML = reviewLinkHtml + collectPanelHtml + '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
     wireDevPanels();
     return;
   }
@@ -676,6 +756,7 @@ async function renderEpisodeList() {
 
   app.innerHTML = `
     <h1>Episodes</h1>
+    ${reviewLinkHtml}
     ${collectPanelHtml}
     <table class="episode-list">
       <thead>
