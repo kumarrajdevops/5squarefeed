@@ -133,7 +133,7 @@ def _caption_fits(text: str) -> bool:
         len(cue["text"].split()) <= MAX_WORDS_PER_CUE
         and cue["end"] - cue["start"] <= MAX_CUE_DURATION_SECONDS
         and len(_wrap_caption_text(cue["text"]).splitlines()) <= CAPTION_MAX_LINES
-        for cue in _split_long_cue(text, 0.0, seconds)
+        for cue in _split_long_cue(text, 0.0, seconds, word_fallback=False)
     )
 
 

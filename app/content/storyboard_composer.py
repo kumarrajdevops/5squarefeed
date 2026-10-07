@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -165,7 +166,16 @@ def _find_best_clause_split(text: str, duration: float) -> int | None:
     return None
 
 
-def _split_long_cue(text: str, start: float, end: float) -> list[dict]:
+def _split_at_word_boundary(text: str) -> int | None:
+    """Character offset of the word boundary closest to the middle of `text`, or None for one word."""
+    boundaries = [m.start() for m in re.finditer(r"\s+", text)]
+    if not boundaries:
+        return None
+    middle = len(text) / 2
+    return min(boundaries, key=lambda point: abs(point - middle))
+
+
+def _split_long_cue(text: str, start: float, end: float, word_fallback: bool = True) -> list[dict]:
     """
     Recursively splits one real cue's text/time span at real clause
     boundaries whenever it exceeds the deterministic budget
@@ -183,13 +193,24 @@ def _split_long_cue(text: str, start: float, end: float) -> list[dict]:
         return [{"text": text, "start": start, "end": end}]
 
     split_at = _find_best_clause_split(text, duration)
+    if split_at is None and word_fallback:
+        # No clause boundary (a long headline, a run-on sentence): break at the word nearest the
+        # middle rather than leave a cue the QA budget rejects. Text is never reworded.
+        split_at = _split_at_word_boundary(text)
+        if split_at is not None:
+            left_seconds = duration * split_at / max(1, len(text))
+            if min(left_seconds, duration - left_seconds) < MIN_CUE_DURATION_SECONDS:
+                split_at = None
     if split_at is None:
         return [{"text": text, "start": start, "end": end}]
 
     left_text, right_text = text[:split_at].strip(), text[split_at:].strip()
     left_fraction = split_at / max(1, len(text))
     mid = start + duration * left_fraction
-    return _split_long_cue(left_text, start, mid) + _split_long_cue(right_text, mid, end)
+    return (
+        _split_long_cue(left_text, start, mid, word_fallback)
+        + _split_long_cue(right_text, mid, end, word_fallback)
+    )
 
 
 def _general_caption_cues(scene: dict) -> list[dict]:
