@@ -1,6 +1,5 @@
 import json
 from datetime import date, datetime, timezone
-from datetime import date as date_cls
 from pathlib import Path
 
 from celery.result import AsyncResult
@@ -44,7 +43,6 @@ from app.tasks.ranking import (
     run_ranking_selection,
 )
 from app.tasks.scheduled import run_daily_processing
-from app.tasks.storyboard_prototype import run_produce_storyboard_prototype
 from app.tasks.verification import run_verification
 from app.worker.celery_app import celery_app
 
@@ -394,44 +392,6 @@ def trigger_rank(episode_date: str | None = None):
 
     task = run_ranking_selection.delay(episode_date)
     return {"task_id": task.id, "status": "queued"}
-
-
-@app.post("/api/v1/dev/storyboard-prototype/{story_id}")
-def trigger_storyboard_prototype(story_id: int):
-    """
-    DEV-only: renders the SAME enhanced Pillow storyboard renderer used
-    by episode production (app/content/episode_renderer.py's
-    render_story_enhanced, via render_story_standalone -- see
-    app/tasks/storyboard_prototype.py) for exactly ONE story. Ensures
-    content/audio/captions and a valid storyboard first (generating/
-    regenerating only if missing or stale), then renders: deterministic
-    hero/statistic/comparison/etc. visual plan, real Ken-Burns motion,
-    light-icon watermark, ASS captions, 0.32s scene-to-scene crossfade,
-    and this story's own processed narration muxed in. Completely
-    separate from that story's OLD production video (media/videos/
-    {story_id}.mp4, still produced by POST /api/v1/stories/{id}/produce
-    via the legacy generate_card/compose_video renderer) -- writes the
-    final enhanced video to media/pillow_enhanced/{story_id}_pillow_enhanced.mp4
-    and touches no database row beyond StoryContent (script/audio/
-    captions, if not already ready). The base media/storyboard/
-    {story_id}/storyboard.json and media/videos/{story_id}_storyboard.mp4
-    remain as the storyboard-QA pipeline's own intermediate artifacts,
-    not the endpoint's user-facing output.
-
-    Fully generic (any story_id with production content already
-    generated works) -- the dashboard's DEV button is what hardcodes
-    this to one specific story for this prototype phase, not this
-    endpoint.
-    """
-    _reject_if_not_dev()
-
-    with SessionLocal() as db:
-        item = db.get(NewsItem, story_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="Story not found.")
-
-    task = run_produce_storyboard_prototype.delay(story_id)
-    return {"story_id": story_id, "task_id": task.id, "status": "queued"}
 
 
 @app.get("/api/v1/tasks/{task_id}/result")
@@ -1408,85 +1368,6 @@ def _serialize_episode(db, episode: Episode) -> dict:
         "primary": primary,
         "backup": backup,
     }
-
-
-@app.get("/api/v1/stories")
-def list_stories(limit: int = 30):
-    # Keep the API limit between 1 and 100.
-    limit = max(1, min(limit, 100))
-
-    with SessionLocal() as db:
-        rows = (
-            db.query(NewsItem, StoryState)
-            .join(StoryState, StoryState.id == NewsItem.id)
-            # Only expose stories classified as AI candidates.
-            .filter(StoryState.ai_relevance == "ai_candidate")
-            # Exclude stories that were grouped as duplicates of
-            # another story -- only the canonical representative of
-            # each duplicate cluster should reach downstream ranking.
-            .filter(StoryState.canonical_story_id.is_(None))
-            # Show newest published stories first.
-            .order_by(NewsItem.published_at.desc())
-            # Apply the requested result limit.
-            .limit(limit)
-            .all()
-        )
-
-        return [
-            {
-                "id": item.id,
-                "title": item.title,
-                "url": item.canonical_url,
-                "source_name": item.source_name,
-                "source_type": item.source_type,
-                "published_at": item.published_at,
-                "collected_at": item.collected_at,
-                "status": item.status,
-                # Return the filter classification for API consumers.
-                "ai_relevance": state.ai_relevance,
-                # Return the deterministic relevance score.
-                "ai_relevance_score": state.ai_relevance_score,
-                # Return why the filter classified the story this way.
-                "filter_reason": state.filter_reason,
-            }
-            for item, state in rows
-        ]
-
-
-@app.get("/api/v1/historical-dedup")
-def list_historical_dedup(date: str | None = None):
-    """
-    Every historical-dedup verdict for one collection day (default: the
-    current one): stories held back as repeats of already-published
-    coverage first, then stories judged a new development of covered ground.
-    """
-    _validate_date_param(date, "date")
-    day = date_cls.fromisoformat(date) if date else target_collection_date()
-
-    with SessionLocal() as db:
-        items = {
-            item.id: item
-            for item in db.query(NewsItem).filter(NewsItem.collection_date == day).all()
-        }
-        relations = _historical_relations(db, items.keys())
-        stories = [
-            {
-                "id": story_id,
-                "title": items[story_id].title,
-                "url": items[story_id].canonical_url,
-                "source_name": items[story_id].source_name,
-                **relation,
-            }
-            for story_id, relation in relations.items()
-        ]
-        stories.sort(key=lambda s: (s["decision"] != "duplicate", -s["similarity"]))
-        return {
-            "date": day.isoformat(),
-            "method_version": DEDUP_METHOD_VERSION,
-            "duplicates": sum(1 for s in stories if s["decision"] == "duplicate"),
-            "new_developments": sum(1 for s in stories if s["decision"] != "duplicate"),
-            "stories": stories,
-        }
 
 
 @app.post("/api/v1/stories/{story_id}/produce")

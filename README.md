@@ -844,11 +844,7 @@ docker compose exec -T api python -m app.scripts.dedup_replay --date 2026-10-05 
 docker compose exec -T api python -m app.scripts.dedup_replay --limit 40          # sample
 ```
 
-Viewing it in the dashboard: the episode list has a **Historical dedup** link
-(`?dedup=<date>`) listing, for a collection day, the stories held back as repeats
-and (collapsed) those kept as new developments of covered ground, each with the
-matched story, similarity, rule and reason. The same data is
-`GET /api/v1/historical-dedup?date=YYYY-MM-DD`. Each story in an episode payload
+Viewing it: each story in an episode payload
 carries `historical_relation`, the story edit panel shows it, and the workflow
 chart has a Historical-Dedup stage. The stage can be run on its own with the
 **4. Historical-Dedup** button (`POST /api/v1/processing/historical-dedup`); run
@@ -857,9 +853,6 @@ it after Content-Dedup so article text is available.
 ## Inspecting results
 
 ```bash
-# All AI-candidate stories, deduplicated (canonical only)
-curl http://localhost:8000/api/v1/stories
-
 # Every story grouped as a duplicate of a given canonical story
 curl http://localhost:8000/api/v1/stories/{story_id}/duplicates
 

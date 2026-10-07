@@ -218,12 +218,6 @@ async function init() {
     appEnv = null; // Fail closed on the dashboard too -- unknown env hides the button.
   }
 
-  const params = new URLSearchParams(location.search);
-  if (params.has("dedup")) {
-    await renderHistoricalDedup(params.get("dedup"));
-    return;
-  }
-
   const episodeId = getEpisodeIdFromUrl();
   if (episodeId) {
     await renderEpisodeStudio(episodeId);
@@ -579,79 +573,6 @@ function wireStageButton({ btnId, resultId, path, formatResult, onSuccess }) {
 }
 
 // ---------------------------------------------------------
-// Historical dedup -- what the semantic detector (app/dedup) decided for
-// one collection day: stories held back as repeats of already-published
-// coverage, and stories kept as a new development of covered ground.
-// Read-only; every row shows the rule and the reason behind the decision.
-// ---------------------------------------------------------
-
-function dedupDecisionLabel(r) {
-  return r.decision === "duplicate" ? "duplicate" : "new development";
-}
-
-function dedupCardHtml(s) {
-  const dup = s.decision === "duplicate";
-  const matchedDate = s.matched_episode_date ? ` &middot; published in the ${escapeHtml(String(s.matched_episode_date))} episode` : "";
-  const facts = (s.new_facts || []).length
-    ? `<p class="dedup-facts">New facts: ${escapeHtml(s.new_facts.join("; "))}</p>`
-    : "";
-  const override = s.editor_override
-    ? `<span class="pill">editor override: ${escapeHtml(s.editor_override)}</span>`
-    : "";
-  return `
-    <div class="panel dedup-card" data-id="${s.id}">
-      <h3>#${s.id} ${escapeHtml(s.title)}</h3>
-      <p class="dedup-meta">${escapeHtml(s.source_name || "")}</p>
-      <p>
-        <span class="pill ${dup ? "repeat-flagged" : "dedup-new"}">${dedupDecisionLabel(s)}</span>
-        <span class="pill">${escapeHtml(s.development_match || "")}</span>
-        <span class="pill">similarity ${Number(s.similarity).toFixed(2)}</span>
-        ${override}
-      </p>
-      <p class="dedup-matched">${dup ? "Repeats" : "Follows"} #${s.matched_story_id}: ${escapeHtml(s.matched_title || "")}${matchedDate}</p>
-      <p class="dedup-reason">${escapeHtml(s.reason || "")} <em>(${escapeHtml(s.rule || "")}, ${escapeHtml(s.content_basis || "")} text)</em></p>
-      ${facts}
-    </div>
-  `;
-}
-
-async function renderHistoricalDedup(date) {
-  app.innerHTML = '<p class="loading">Loading historical dedup…</p>';
-
-  let data;
-  try {
-    data = await apiGet("/historical-dedup" + (date ? `?date=${encodeURIComponent(date)}` : ""));
-  } catch (err) {
-    app.innerHTML = `<p class="error">Failed to load historical dedup: ${escapeHtml(err.message)}</p>`;
-    return;
-  }
-
-  const dups = data.stories.filter((s) => s.decision === "duplicate");
-  const news = data.stories.filter((s) => s.decision !== "duplicate");
-
-  app.innerHTML = `
-    <p><a class="btn btn-ghost" href="/dashboard/">&larr; Episodes</a></p>
-    <h1>Historical dedup</h1>
-    <p class="dedup-controls">
-      <label>Collection day <input type="date" id="dedup-date" value="${escapeAttr(data.date)}"></label>
-      <span>${data.duplicates} held back as repeats, ${data.new_developments} new development(s) of covered ground</span>
-      <span class="review-version">${escapeHtml(data.method_version)}</span>
-    </p>
-    <p class="review-help">A story is held back only when it reports substantially the same development that was already published. Sharing a company, product or topic is not enough. Stories with no related published coverage are not listed.</p>
-    <h2>Held back as repeats (${dups.length})</h2>
-    ${dups.map(dedupCardHtml).join("") || '<p class="loading">None for this day.</p>'}
-    <details class="dedup-new-list">
-      <summary><strong>Kept as new developments (${news.length})</strong> -- related to published coverage but not the same development</summary>
-      ${news.map(dedupCardHtml).join("") || '<p class="loading">None for this day.</p>'}
-    </details>
-  `;
-
-  document.getElementById("dedup-date").addEventListener("change", (ev) => {
-    location.search = "?dedup=" + encodeURIComponent(ev.target.value);
-  });
-}
-
-// ---------------------------------------------------------
 // Episode list
 // ---------------------------------------------------------
 
@@ -665,8 +586,6 @@ async function renderEpisodeList() {
     app.innerHTML = `<p class="error">Failed to load episodes: ${escapeHtml(err.message)}</p>`;
     return;
   }
-
-  const dedupLinkHtml = '<p><a class="btn" href="?dedup=" id="dedup-link">Historical dedup</a></p>';
 
   const collectPanelHtml = isDevEnvironment(appEnv)
     ? `
@@ -693,12 +612,6 @@ async function renderEpisodeList() {
         <p id="historical-dedup-result" class="collect-result"></p>
         <p id="verify-result" class="collect-result"></p>
         <p id="rank-result" class="collect-result"></p>
-
-        <p class="collect-stage-label">Storyboard prototype (story 51 only -- see TODO.md):</p>
-        <div class="collect-row">
-          <button class="btn btn-small" id="storyboard-prototype-btn" type="button">Generate Storyboard Video</button>
-        </div>
-        <p id="storyboard-prototype-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -741,25 +654,10 @@ async function renderEpisodeList() {
           : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
       onSuccess: () => renderEpisodeList(),
     });
-    wireStageButton({
-      btnId: "storyboard-prototype-btn", resultId: "storyboard-prototype-result",
-      path: "/dev/storyboard-prototype/51",   // hardcoded for this prototype phase only
-      formatResult: (r) => {
-        if (r.status === "failed") return `Failed (${escapeHtml(r.stage || "?")}): ${escapeHtml(r.error || "")}`;
-        const qa = r.qa || [];
-        const passed = qa.filter((c) => c.passed).length;
-        const qaText = r.reused
-          ? "storyboard reused, no new QA run"
-          : `${passed}/${qa.length} QA checks passed`;
-        return `${escapeHtml(r.status)} -- ${r.scene_count ?? "?"} scenes ` +
-          `(${(r.scene_types || []).join(" → ")}), ${qaText}. ` +
-          `${escapeHtml(r.video_path || "")}`;
-      },
-    });
   };
 
   if (!episodes.length) {
-    app.innerHTML = dedupLinkHtml + collectPanelHtml + '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
+    app.innerHTML = collectPanelHtml + '<p class="loading">No episodes yet. Run ranking/selection first (POST /api/v1/episodes/select).</p>';
     wireDevPanels();
     return;
   }
@@ -780,7 +678,6 @@ async function renderEpisodeList() {
 
   app.innerHTML = `
     <h1>Episodes</h1>
-    ${dedupLinkHtml}
     ${collectPanelHtml}
     <table class="episode-list">
       <thead>
