@@ -162,6 +162,58 @@ def test_same_product_with_disagreeing_development_types_is_never_corroborated()
     assert not _types_conflict(replace(b, types=("other",)), a)
 
 
+MISTRAL_BODY = (
+    "French AI lab Mistral AI has released Mistral Large 4, a new large multimodal model aiming to "
+    "leapfrog both American and Chinese rivals. The model has one trillion parameters and is available "
+    "through Mistral's API and on Hugging Face. Mistral said the release closes much of the gap to "
+    "closed frontier models on reasoning and coding benchmarks."
+)
+
+
+def test_bare_headline_without_text_is_the_same_report_as_an_article_that_names_it():
+    thin = day_story(1, "Mistral Large 4", None, hours=0, source="mistral.ai").features
+    full = day_story(2, "Mistral's new 1T model aims to leapfrog closed and open rivals", MISTRAL_BODY,
+                     hours=1, source="TechCrunch").features
+    for new, old in ((full, thin), (thin, full)):
+        verdict = judge_pair(new, old, semantic=0.73, title_similarity=0.67, tfidf=0.0)
+        assert verdict.duplicate and verdict.rule == "bare_headline_report"
+
+
+def test_bare_headline_rule_needs_the_subject_in_the_other_stories_lead():
+    thin = day_story(1, "Mistral Large 4", None, source="mistral.ai").features
+    other = day_story(2, "Mistral raises funding", "Mistral AI raised a new funding round led by investors "
+                      "on Tuesday. The company is valued at billions of dollars.", hours=1).features
+    assert not judge_pair(other, thin, semantic=0.73, title_similarity=0.5, tfidf=0.0).duplicate
+
+
+def test_bare_headline_rule_ignores_headlines_that_state_a_development():
+    thin = day_story(1, "Mistral releases Large 4", None, source="mistral.ai").features
+    full = day_story(2, "Mistral's new model", MISTRAL_BODY, hours=1).features
+    assert judge_pair(full, thin, semantic=0.73, title_similarity=0.6, tfidf=0.0).rule != "bare_headline_report"
+
+
+def test_bare_headline_rule_needs_text_on_the_other_side():
+    a = day_story(1, "Mistral Large 4", None, source="mistral.ai").features
+    b = day_story(2, "Mistral Large 4", None, hours=1).features
+    assert judge_pair(b, a, semantic=0.9, title_similarity=0.95, tfidf=0.0).rule != "bare_headline_report"
+
+
+def test_article_with_text_becomes_canonical_over_an_earlier_headline_only_story(model):
+    thin = day_story(1, "Mistral Large 4", None, hours=0, source="mistral.ai")
+    full = day_story(2, "Mistral's new 1T model aims to leapfrog closed and open rivals", MISTRAL_BODY,
+                     hours=1, source="Unknown Blog")
+    result = cluster_same_day([thin, full], set(), model)
+    assert result.links[1].canonical_id == 2 and 2 not in result.links and result.demoted == {1}
+
+
+def test_pinned_headline_only_story_is_kept_and_the_article_links_to_it(model):
+    thin = day_story(1, "Mistral Large 4", None, hours=0, source="mistral.ai")
+    full = day_story(2, "Mistral's new 1T model aims to leapfrog closed and open rivals", MISTRAL_BODY,
+                     hours=1, source="TechCrunch")
+    result = cluster_same_day([thin, full], {1}, model)
+    assert result.links[2].canonical_id == 1 and not result.demoted
+
+
 # --------------------------------------------------------------------------------------------
 # Pool, canonical and election behaviour
 # --------------------------------------------------------------------------------------------
@@ -210,7 +262,7 @@ def test_reason_is_versioned_and_explainable(model):
         day_story(2, "OpenAI unveils Dots, its always-on AI agents", DOTS_OTHER_PUBLISHER, hours=2),
     ])
     text = found[2].dedup_reason()
-    assert text.startswith("same_day_v2[") and "semantic=" in text and "matched_against_story_id=1" in text
+    assert text.startswith("same_day_v3[") and "semantic=" in text and "matched_against_story_id=1" in text
 
 
 # --------------------------------------------------------------------------------------------
@@ -267,7 +319,7 @@ def test_stage_marks_duplicates_and_leaves_new_developments(db_session, model, n
     result = content_dedup.enrich_and_dedup_by_content(db_session, DAY, embedder=model)
     assert canon(db_session, b) == a and canon(db_session, a) is None and canon(db_session, c) is None
     assert result["content_duplicates_found"] == 1
-    assert db_session.get(StoryState, b).dedup_reason.startswith("same_day_v2[")
+    assert db_session.get(StoryState, b).dedup_reason.startswith("same_day_v3[")
 
 
 def test_stage_rerun_is_idempotent(db_session, model, no_network):
