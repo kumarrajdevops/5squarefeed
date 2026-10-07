@@ -12,7 +12,18 @@ from sqlalchemy import select, text
 from app.config import settings
 from app.dates import episode_key, target_collection_date
 from app.db import SessionLocal
-from app.models import CollectionRun, Episode, EpisodePublication, EpisodeStory, NewsItem, Notification, StoryContent, StoryState
+from app.dedup.decision import METHOD_VERSION as DEDUP_METHOD_VERSION
+from app.models import (
+    CollectionRun,
+    Episode,
+    EpisodePublication,
+    EpisodeStory,
+    HistoricalStoryRelation,
+    NewsItem,
+    Notification,
+    StoryContent,
+    StoryState,
+)
 from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
@@ -23,6 +34,7 @@ from app.tasks.episode_qa import run_episode_qa
 from app.tasks.episode_storyboard import read_report as read_storyboard_report
 from app.tasks.episode_storyboard import run_episode_storyboards, start_report as start_storyboard_report
 from app.tasks.episode_video import produce_episode_video
+from app.tasks.historical_dedup import run_historical_dedup
 from app.tasks.publishing import publish_episode_to_youtube
 from app.tasks.ranking import (
     REPROCESSABLE_STATUSES,
@@ -31,7 +43,6 @@ from app.tasks.ranking import (
     run_ranking_selection,
 )
 from app.tasks.scheduled import run_daily_processing
-from app.tasks.storyboard_prototype import run_produce_storyboard_prototype
 from app.tasks.verification import run_verification
 from app.worker.celery_app import celery_app
 
@@ -317,7 +328,7 @@ def trigger_dedup(target_date: str | None = None):
 @app.post("/api/v1/processing/content-dedup")
 def trigger_content_dedup(target_date: str | None = None):
     """
-    Full-article-text content dedup + historical-repeat detection over
+    Full-article-text fetch + same-day content dedup over
     target_date's remaining canonical stories -- see
     app/tasks/content_dedup.py::enrich_and_dedup_by_content. Fetches
     real article pages for stories not already attempted; can take a
@@ -327,6 +338,23 @@ def trigger_content_dedup(target_date: str | None = None):
     _validate_date_param(target_date, "target_date")
 
     task = run_enrich_and_dedup_by_content.delay(target_date_iso=target_date)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/historical-dedup")
+def trigger_historical_dedup(target_date: str | None = None):
+    """
+    Semantic duplicate check of target_date's remaining canonical AI
+    candidates against already-published stories -- see
+    app/tasks/historical_dedup.py::deduplicate_against_history. Run it
+    after Content-Dedup so the article text is available. Idempotent:
+    already-decided stories are skipped; verdicts land in
+    editorial.historical_story_relations.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+
+    task = run_historical_dedup.delay(target_date_iso=target_date)
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -364,44 +392,6 @@ def trigger_rank(episode_date: str | None = None):
 
     task = run_ranking_selection.delay(episode_date)
     return {"task_id": task.id, "status": "queued"}
-
-
-@app.post("/api/v1/dev/storyboard-prototype/{story_id}")
-def trigger_storyboard_prototype(story_id: int):
-    """
-    DEV-only: renders the SAME enhanced Pillow storyboard renderer used
-    by episode production (app/content/episode_renderer.py's
-    render_story_enhanced, via render_story_standalone -- see
-    app/tasks/storyboard_prototype.py) for exactly ONE story. Ensures
-    content/audio/captions and a valid storyboard first (generating/
-    regenerating only if missing or stale), then renders: deterministic
-    hero/statistic/comparison/etc. visual plan, real Ken-Burns motion,
-    light-icon watermark, ASS captions, 0.32s scene-to-scene crossfade,
-    and this story's own processed narration muxed in. Completely
-    separate from that story's OLD production video (media/videos/
-    {story_id}.mp4, still produced by POST /api/v1/stories/{id}/produce
-    via the legacy generate_card/compose_video renderer) -- writes the
-    final enhanced video to media/pillow_enhanced/{story_id}_pillow_enhanced.mp4
-    and touches no database row beyond StoryContent (script/audio/
-    captions, if not already ready). The base media/storyboard/
-    {story_id}/storyboard.json and media/videos/{story_id}_storyboard.mp4
-    remain as the storyboard-QA pipeline's own intermediate artifacts,
-    not the endpoint's user-facing output.
-
-    Fully generic (any story_id with production content already
-    generated works) -- the dashboard's DEV button is what hardcodes
-    this to one specific story for this prototype phase, not this
-    endpoint.
-    """
-    _reject_if_not_dev()
-
-    with SessionLocal() as db:
-        item = db.get(NewsItem, story_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="Story not found.")
-
-    task = run_produce_storyboard_prototype.delay(story_id)
-    return {"story_id": story_id, "task_id": task.id, "status": "queued"}
 
 
 @app.get("/api/v1/tasks/{task_id}/result")
@@ -1128,6 +1118,8 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
     ai_candidates = sum(1 for s in story_states if s.ai_relevance == "ai_candidate")
     dup_count = sum(1 for s in story_states if s.canonical_story_id is not None)
     repeat_count = sum(1 for s in story_states if s.repeats_story_id is not None)
+    historical = _historical_relations(db, [s.id for s in story_states])
+    historical_duplicates = sum(1 for r in historical.values() if r["decision"] == "duplicate")
     fetched_count = sum(1 for s in story_states if s.content_fetch_status is not None)
     verified_count = sum(1 for s in story_states if s.verification_status == "verified")
     unverified_count = sum(1 for s in story_states if s.verification_status == "unverified")
@@ -1165,7 +1157,10 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {"stage": "collect", "label": "Collect", "status": collect_status, "detail": collect_detail},
         {
             "stage": "classify", "label": "Classify", "status": processed_status,
-            "detail": f"{classified} classified, {ai_candidates} AI candidates" if classified else "not yet run",
+            "detail": (
+                f"{classified} classified, {ai_candidates} AI candidates"
+                if classified else "not yet run"
+            ),
         },
         {
             "stage": "dedup", "label": "Dedup", "status": processed_status,
@@ -1174,8 +1169,16 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {
             "stage": "content_dedup", "label": "Content-Dedup", "status": processed_status,
             "detail": (
-                f"{fetched_count} article(s) fetched, {repeat_count} historical repeat(s)"
+                f"{fetched_count} article(s) fetched"
                 if classified else "not yet run"
+            ),
+        },
+        {
+            "stage": "historical_dedup", "label": "Historical-Dedup",
+            "status": "done" if historical else "pending",
+            "detail": (
+                f"{historical_duplicates} repeat(s) held back, {len(historical) - historical_duplicates} new development(s) of covered ground"
+                if historical else "not run for this date"
             ),
         },
         {
@@ -1191,6 +1194,62 @@ def _compute_pipeline_stages(db, episode: Episode, primary_count: int, backup_co
         {"stage": "approve", "label": "Approve", "status": approve_status, "detail": approve_detail},
         {"stage": "publish", "label": "Publish", "status": publish_status, "detail": publish_detail},
     ]
+
+
+def _historical_relations(db, story_ids) -> dict:
+    """
+    Historical-dedup verdict per story (current method_version): the duplicate
+    verdict if there is one, else the closest related one, with the matched
+    story's title and the date of the episode that first published it.
+    """
+    ids = list(story_ids)
+    if not ids:
+        return {}
+    rows = (
+        db.query(HistoricalStoryRelation)
+        .filter(
+            HistoricalStoryRelation.method_version == DEDUP_METHOD_VERSION,
+            HistoricalStoryRelation.story_id.in_(ids),
+        )
+        .all()
+    )
+    best: dict[int, HistoricalStoryRelation] = {}
+    for row in rows:
+        current = best.get(row.story_id)
+        key = (row.decision == "duplicate", row.semantic_similarity)
+        if current is None or key > (current.decision == "duplicate", current.semantic_similarity):
+            best[row.story_id] = row
+    matched_ids = {row.matched_story_id for row in best.values()}
+    titles = dict(db.query(NewsItem.id, NewsItem.title).filter(NewsItem.id.in_(matched_ids)).all()) if matched_ids else {}
+    published = {}
+    if matched_ids:
+        for story_id, episode_date in (
+            db.query(EpisodeStory.story_id, Episode.episode_date)
+            .join(Episode, Episode.id == EpisodeStory.episode_id)
+            .filter(EpisodeStory.selection_status == "primary", EpisodeStory.story_id.in_(matched_ids))
+            .order_by(Episode.episode_date.desc())
+            .all()
+        ):
+            published[story_id] = episode_date  # ends on the earliest date
+    return {
+        story_id: {
+            "decision": row.editor_override or row.decision,
+            "detector_decision": row.decision,
+            "editor_override": row.editor_override,
+            "matched_story_id": row.matched_story_id,
+            "matched_title": titles.get(row.matched_story_id),
+            "matched_episode_date": published.get(row.matched_story_id),
+            "similarity": row.semantic_similarity,
+            "title_similarity": row.title_similarity,
+            "development_match": row.development_match,
+            "new_facts": json.loads(row.new_facts_detected) if row.new_facts_detected else [],
+            "rule": row.rule,
+            "reason": row.reason,
+            "content_basis": row.content_basis,
+            "method_version": row.method_version,
+        }
+        for story_id, row in best.items()
+    }
 
 
 def _serialize_episode(db, episode: Episode) -> dict:
@@ -1214,6 +1273,7 @@ def _serialize_episode(db, episode: Episode) -> dict:
 
     primary = []
     backup = []
+    relations = _historical_relations(db, [item.id for _, item, _, _ in rows])
 
     for episode_story, item, state, content in rows:
         entry = {
@@ -1241,6 +1301,9 @@ def _serialize_episode(db, episode: Episode) -> dict:
             # editor decides whether to swap it out.
             "repeats_story_id": state.repeats_story_id,
             "repeat_reason": state.repeat_reason,
+            # Semantic historical-dedup verdict (app/dedup); None when the story had no related
+            # published coverage. Stories judged duplicates never reach an episode.
+            "historical_relation": relations.get(item.id),
             # Needed by the dashboard's "click a story, jump the
             # player" feature (sums preceding durations) and its edit
             # panel -- None until that story's content pipeline runs.
@@ -1305,49 +1368,6 @@ def _serialize_episode(db, episode: Episode) -> dict:
         "primary": primary,
         "backup": backup,
     }
-
-
-@app.get("/api/v1/stories")
-def list_stories(limit: int = 30):
-    # Keep the API limit between 1 and 100.
-    limit = max(1, min(limit, 100))
-
-    with SessionLocal() as db:
-        rows = (
-            db.query(NewsItem, StoryState)
-            .join(StoryState, StoryState.id == NewsItem.id)
-            # Only expose stories classified as AI candidates.
-            .filter(StoryState.ai_relevance == "ai_candidate")
-            # Exclude stories that were grouped as duplicates of
-            # another story -- only the canonical representative of
-            # each duplicate cluster should reach downstream ranking.
-            .filter(StoryState.canonical_story_id.is_(None))
-            # Show newest published stories first.
-            .order_by(NewsItem.published_at.desc())
-            # Apply the requested result limit.
-            .limit(limit)
-            .all()
-        )
-
-        return [
-            {
-                "id": item.id,
-                "title": item.title,
-                "url": item.canonical_url,
-                "source_name": item.source_name,
-                "source_type": item.source_type,
-                "published_at": item.published_at,
-                "collected_at": item.collected_at,
-                "status": item.status,
-                # Return the filter classification for API consumers.
-                "ai_relevance": state.ai_relevance,
-                # Return the deterministic relevance score.
-                "ai_relevance_score": state.ai_relevance_score,
-                # Return why the filter classified the story this way.
-                "filter_reason": state.filter_reason,
-            }
-            for item, state in rows
-        ]
 
 
 @app.post("/api/v1/stories/{story_id}/produce")

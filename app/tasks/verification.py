@@ -1,15 +1,13 @@
 import json
 from datetime import date
 
-from sqlalchemy import func
-
 from app.dates import target_collection_date
 from app.db import SessionLocal
 from app.extraction.fact_extractor import extract_facts
 from app.extraction.taxonomy import classify_category
 from app.models import NewsItem, StoryState
 from app.ranking.engine import compute_credibility_score
-from app.verification.engine import verify_story
+from app.verification.engine import count_independent_outlets, verify_story
 from app.worker.celery_app import celery_app
 
 
@@ -38,8 +36,12 @@ def run_fact_extraction_and_verification(db, target_date) -> dict:
     """
 
     # Same eligibility filter run_ranking_selection uses (canonical,
-    # AI-candidate), scoped to target_date and to ones this task
-    # hasn't touched yet so re-running is cheap and idempotent.
+    # AI-candidate), scoped to target_date. Every canonical story is
+    # re-assessed on each run: the status depends on how many other
+    # outlets carry the story, and dedup can change that after the first
+    # pass (a duplicate merged later, a duplicate promoted to canonical).
+    # Facts/taxonomy are deterministic per story and are only computed
+    # the first time (status still "pending").
     rows = (
         db.query(NewsItem, StoryState)
         .join(StoryState, StoryState.id == NewsItem.id)
@@ -47,39 +49,36 @@ def run_fact_extraction_and_verification(db, target_date) -> dict:
             NewsItem.collection_date == target_date,
             StoryState.ai_relevance == "ai_candidate",
             StoryState.canonical_story_id.is_(None),
-            StoryState.verification_status == "pending",
         )
         .all()
     )
 
-    # Duplicate counts across ALL stories (not just the ones being
-    # processed this run) -- a story processed in an earlier run could
-    # have gained a new duplicate since, but re-processing
-    # already-verified stories isn't this task's job (ranking reads
-    # duplicate_count fresh itself); this count is only used for
-    # stories currently in the `rows` list above.
-    dup_count_rows = (
-        db.query(StoryState.canonical_story_id, func.count(StoryState.id))
+    # Sources of every story merged into a canonical (any date).
+    dup_sources: dict[int, list[str]] = {}
+    for canonical_id, source_name in (
+        db.query(StoryState.canonical_story_id, NewsItem.source_name)
+        .join(NewsItem, NewsItem.id == StoryState.id)
         .filter(StoryState.canonical_story_id.isnot(None))
-        .group_by(StoryState.canonical_story_id)
         .all()
-    )
-    dup_counts: dict[int, int] = dict(dup_count_rows)
+    ):
+        dup_sources.setdefault(canonical_id, []).append(source_name)
 
     processed = 0
     verified_count = 0
     unverified_count = 0
+    changed = 0
 
     for item, state in rows:
-        facts = extract_facts(title=item.title, summary=item.raw_summary)
-        state.extracted_facts = json.dumps(facts)
-        state.taxonomy_category = classify_category(
-            title=item.title,
-            events=facts["events"],
-            source_type=item.source_type,
-        )
+        if state.verification_status == "pending":
+            facts = extract_facts(title=item.title, summary=item.raw_summary)
+            state.extracted_facts = json.dumps(facts)
+            state.taxonomy_category = classify_category(
+                title=item.title,
+                events=facts["events"],
+                source_type=item.source_type,
+            )
 
-        duplicate_count = dup_counts.get(item.id, 0)
+        duplicate_count = count_independent_outlets(item.source_name, dup_sources.get(item.id, []))
         credibility = compute_credibility_score(item.source_name)
 
         status, reason = verify_story(
@@ -87,6 +86,8 @@ def run_fact_extraction_and_verification(db, target_date) -> dict:
             credibility_score=credibility,
             duplicate_count=duplicate_count,
         )
+        if (state.verification_status, state.verification_reason) != (status, reason):
+            changed += 1
         state.verification_status = status
         state.verification_reason = reason
 
@@ -102,6 +103,7 @@ def run_fact_extraction_and_verification(db, target_date) -> dict:
         "processed": processed,
         "verified": verified_count,
         "unverified": unverified_count,
+        "changed": changed,
     }
 
     print(f"[verification] Completed: {result}")

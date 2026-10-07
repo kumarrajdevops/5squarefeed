@@ -1,4 +1,7 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from app.verification.engine import count_independent_outlets, verify_story
 
 
 # ---------------------------------------------------------
@@ -32,6 +35,19 @@ CREDIBILITY_WEIGHTS: dict[str, float] = {
     "The Register": 0.80,
     "MacRumors": 0.75,
     "IEEE Spectrum": 0.90,
+    # First-party research blogs of AI labs/universities: same tier as
+    # "Microsoft Research Blog" -- the organisation reporting its own work.
+    "Google Research Blog": 0.90,
+    "Amazon Science": 0.90,
+    "Berkeley AI Research (BAIR)": 0.90,
+}
+
+# The source registry names a feed differently from the publisher name used above (which is
+# what the publisher resolver produces for a Hacker News link-post). Both must score the same
+# publisher the same, so the feed names resolve to the publisher's entry.
+CREDIBILITY_ALIASES: dict[str, str] = {
+    "The Guardian AI": "The Guardian",
+    "IEEE Spectrum — Artificial Intelligence": "IEEE Spectrum",
 }
 
 # Fallback for any source not explicitly weighted above (e.g. a new
@@ -86,17 +102,19 @@ def compute_recency_score(
 def compute_credibility_score(source_name: str) -> float:
     """
     Static per-source credibility weight. See CREDIBILITY_WEIGHTS
-    above for rationale and DEFAULT_CREDIBILITY for the fallback.
+    above for rationale and DEFAULT_CREDIBILITY for the fallback. An unrated source gets the
+    neutral default (not a penalty): it is a prior, not evidence against the source.
     """
 
-    return CREDIBILITY_WEIGHTS.get(source_name, DEFAULT_CREDIBILITY)
+    name = CREDIBILITY_ALIASES.get(source_name, source_name)
+    return CREDIBILITY_WEIGHTS.get(name, DEFAULT_CREDIBILITY)
 
 
 def compute_momentum_score(duplicate_count: int, cap: int = MOMENTUM_CAP) -> float:
     """
-    How many other stories were grouped as duplicates of this one
-    (i.e. how many other outlets independently covered the same
-    story). More coverage = more momentum, capped so one viral story
+    How many other outlets independently covered the same story (the caller passes the
+    distinct-other-outlet count, see count_independent_outlets; a second item from the same
+    publisher is not extra coverage). More coverage = more momentum, capped so one viral story
     doesn't mathematically dominate everything else.
     """
 
@@ -104,6 +122,39 @@ def compute_momentum_score(duplicate_count: int, cap: int = MOMENTUM_CAP) -> flo
         return 0.0
 
     return max(0.0, min(1.0, duplicate_count / cap))
+
+
+# Value of the AI-relevance component for a story the rules classifier has certified as AI
+# (a rules "candidate", or a review story an editor promoted). The component measures how
+# AI-relevant a story is; for these stories that is settled by the classification, so it is the
+# full value rather than a number inferred from the legacy keyword list.
+CLASSIFIED_AI_RELEVANCE = 1.0
+
+
+def ai_relevance_input(
+    ai_relevance_score: float | None,
+    classifier_version: str | None = None,
+    classifier_disposition: str | None = None,
+    review_decision: str | None = None,
+) -> float | None:
+    """
+    The AI-relevance input for compute_total_score.
+
+    Rows with a persisted classifier result (classifier_version set) are ranked on that result,
+    not on ai_relevance_score, which is the legacy keyword scorer's output and misses AI terms the
+    classifier knows (ChatGPT, Copilot, Apple Intelligence...). A story is certified AI when the
+    classifier said "candidate", or when it said "review" and an editor promoted it. Rows
+    classified before the classifier existed have no classifier_version and keep using
+    ai_relevance_score unchanged.
+
+    Which stories are eligible for ranking at all is decided elsewhere (ai_relevance ==
+    "ai_candidate"); this only chooses the value of the AI-relevance component.
+    """
+    if classifier_version is None:
+        return ai_relevance_score
+    if classifier_disposition == "candidate" or review_decision == "promoted":
+        return CLASSIFIED_AI_RELEVANCE
+    return ai_relevance_score
 
 
 def compute_total_score(
@@ -161,9 +212,86 @@ def compute_total_score(
         f"credibility={credibility:.2f}(w={SCORE_WEIGHTS['credibility']}), "
         f"ai_relevance={ai_component:.2f}(w={SCORE_WEIGHTS['ai_relevance']}), "
         f"momentum={momentum:.2f}(w={SCORE_WEIGHTS['momentum']}, "
-        f"duplicate_count={duplicate_count}), "
+        f"independent_outlets={duplicate_count}), "
         f"verification={verification_status}(bonus={verification_bonus:.2f}) "
         f"=> total={total:.3f}"
     )
 
     return total, reason
+
+
+@dataclass(frozen=True)
+class EventMember:
+    """One story of an event cluster (a canonical story plus the duplicates linked to it)."""
+    story_id: int
+    source_name: str
+    published_at: datetime | None
+    ai_relevance: float | None
+    verification_status: str = "pending"
+    # Could this story stand as the event's representative on its own (AI candidate, source
+    # sufficient, not a historical duplicate, not already narrated)? Non-viable members still
+    # count as outlets that covered the event.
+    viable: bool = True
+
+
+@dataclass(frozen=True)
+class EventScore:
+    total: float
+    reason: str
+    representative_id: int
+
+
+def score_event(
+    canonical: EventMember,
+    duplicates: list[EventMember],
+    now: datetime,
+    window_hours: float,
+) -> EventScore:
+    """
+    Score one news development. Deduplication keeps a single canonical story per development,
+    and the canonical is not always the best-scoring member (title dedup keeps the oldest story).
+    Ranking only ever sees canonicals, so a development whose canonical scores below the cutoff
+    would vanish even when a newer duplicate would have made it. The event therefore scores as its
+    best viable member; the canonical stays the story that is selected (no links change).
+
+    Corroboration is the number of distinct OTHER outlets in the cluster, the same count
+    Verification uses. The canonical keeps its persisted verification status; a duplicate
+    standing in as representative gets the status verify_story derives for it.
+    """
+    cluster = [canonical, *duplicates]
+    best: tuple[float, bool, int] | None = None
+    best_member = canonical
+    best_reason = ""
+    best_total = 0.0
+    canonical_total = 0.0
+    for member in cluster:
+        if member is not canonical and not member.viable:
+            continue
+        outlets = count_independent_outlets(
+            member.source_name, [o.source_name for o in cluster if o is not member]
+        )
+        if member is canonical:
+            status = member.verification_status
+        else:
+            status = verify_story(member.source_name, compute_credibility_score(member.source_name), outlets)[0]
+        total, reason = compute_total_score(
+            published_at=member.published_at,
+            source_name=member.source_name,
+            ai_relevance_score=member.ai_relevance,
+            duplicate_count=outlets,
+            now=now,
+            window_hours=window_hours,
+            verification_status=status,
+        )
+        if member is canonical:
+            canonical_total = total
+        # Highest score; the canonical wins a tie, then the lowest id (deterministic).
+        key = (round(total, 9), member is canonical, -member.story_id)
+        if best is None or key > best:
+            best, best_member, best_reason, best_total = key, member, reason, total
+    if best_member is not canonical:
+        best_reason += (
+            f" [event score from duplicate #{best_member.story_id} ({best_member.source_name}); "
+            f"canonical #{canonical.story_id} alone scores {canonical_total:.3f}]"
+        )
+    return EventScore(total=best_total, reason=best_reason, representative_id=best_member.story_id)

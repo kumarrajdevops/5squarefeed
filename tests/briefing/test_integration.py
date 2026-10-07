@@ -8,6 +8,7 @@ import requests
 
 from app import main
 from app.content import article_extractor
+from app.content.briefing import briefing_fingerprint
 from app.content.briefing.loader import load_corroborating
 from app.models import EpisodeStory, NewsItem, StoryContent, StoryState
 from app.qa.video_qa import run_qa_checks
@@ -140,6 +141,26 @@ def test_assess_source_sufficiency_stores_status_and_detail(db_session):
     detail = json.loads(bad_state.sufficiency_detail)
     assert detail["status"] == "insufficient" and detail["reason"]
     assert bad_state.source_word_count == len(S.HN_TEASER.split())
+
+
+def test_a_verdict_is_stale_when_never_assessed_or_assessed_under_other_briefing_code(db_session, monkeypatch):
+    item, state = _story(db_session, S.HEADLINE, "", S.STRONG_ARTICLE)
+    assert content_dedup.sufficiency_is_stale(state)
+    content_dedup.assess_source_sufficiency(db_session, item, state)
+    assert json.loads(state.sufficiency_detail)["briefing_fingerprint"] == briefing_fingerprint()
+    assert not content_dedup.sufficiency_is_stale(state)
+
+    monkeypatch.setattr(content_dedup, "briefing_fingerprint", lambda: "changed-composer")
+    assert content_dedup.sufficiency_is_stale(state)
+
+    state.sufficiency_detail = None
+    state.source_sufficiency = "sufficient"
+    monkeypatch.undo()
+    assert content_dedup.sufficiency_is_stale(state)
+
+
+def test_the_fingerprint_tracks_the_composer_sources():
+    assert briefing_fingerprint() == briefing_fingerprint() and len(briefing_fingerprint()) == 12
 
 
 def test_a_same_day_sibling_can_lift_a_thin_story_to_briefable(db_session):

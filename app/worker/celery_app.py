@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.tasks.classify",
         "app.tasks.dedup",
         "app.tasks.content_dedup",
+        "app.tasks.historical_dedup",
         "app.tasks.verification",
         "app.tasks.ranking",
         "app.tasks.content",
@@ -20,7 +21,6 @@ celery_app = Celery(
         "app.tasks.episode_qa",
         "app.tasks.publishing",
         "app.tasks.scheduled",
-        "app.tasks.storyboard_prototype",
     ],
 )
 

@@ -169,6 +169,18 @@ class StoryState(Base):
     ai_relevance_score: Mapped[float | None] = mapped_column(nullable=True)
     filter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Structured result of the classification gate (app/filters/classification_rules.py).
+    # NULL on rows classified before the gate existed. ai_relevance is the live state
+    # ("ai_candidate" | "not_ai"; "ai_review" survives only in rows written by rules-v1/v2 and is
+    # re-evaluated automatically); classifier_disposition is what the classifier itself said.
+    classifier_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    classifier_disposition: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    classifier_ai_relatedness: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    classifier_content_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Legacy (rules-v1/v2 review lane): "promoted" | "rejected". Nothing writes these any more.
+    review_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # NULL = canonical (unique, or representative of a duplicate
     # group). Non-null = duplicate of the editorial.stories row with
     # that id. Rows are never deleted; just excluded downstream.
@@ -403,3 +415,49 @@ class Notification(Base):
     )
     message: Mapped[str] = mapped_column(Text, nullable=False)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class HistoricalStoryRelation(Base):
+    """
+    Verdict of the semantic historical-duplicate detector: a story compared with one earlier
+    published primary. Written once per (story, matched story, method_version); never updated by
+    the pipeline. canonical_story_id (same-day dedup) is unrelated and untouched.
+
+    editor_override is reserved for future editorial overrides: the pipeline never writes it, and
+    the effective decision is coalesce(editor_override, decision).
+    """
+
+    __tablename__ = "historical_story_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "story_id", "matched_story_id", "method_version", name="uq_historical_relation"
+        ),
+        {"schema": "editorial"},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    story_id: Mapped[int] = mapped_column(
+        ForeignKey("editorial.stories.id"), nullable=False, index=True
+    )
+    matched_story_id: Mapped[int] = mapped_column(
+        ForeignKey("editorial.stories.id"), nullable=False, index=True
+    )
+
+    # "duplicate" | "new_development"
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    semantic_similarity: Mapped[float] = mapped_column(Float, nullable=False)
+    title_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    development_match: Mapped[str] = mapped_column(String(120), nullable=False)
+    # JSON-encoded list of human-readable new facts the story carries over the matched one
+    new_facts_detected: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    rule: Mapped[str] = mapped_column(String(40), nullable=False)
+    content_basis: Mapped[str] = mapped_column(String(20), nullable=False)
+    method_version: Mapped[str] = mapped_column(String(30), nullable=False)
+
+    editor_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    override_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )

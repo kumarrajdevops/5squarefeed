@@ -677,3 +677,11 @@ li.sb-row:first-child { border-top: none; padding-top: 0; }
 .sb-name { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
 .sb-issue { font-size: 13px; color: var(--text-muted); margin: 2px 0; display: flex; gap: 8px; align-items: baseline; }
 .sb-issue .pill { flex: none; }
+
+/* Review queue */
+.review-card h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+.review-meta, .review-summary, .review-reason { margin: 0.25rem 0; }
+.review-meta, .review-version, .review-help { color: var(--text-muted); font-size: 0.85rem; }
+.review-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+.review-controls { display: flex; gap: 1rem; align-items: center; }
+

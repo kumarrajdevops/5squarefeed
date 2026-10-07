@@ -123,6 +123,18 @@ function renderEditMetaHtml(story) {
     `;
   }
 
+  // Semantic historical dedup (app/dedup): how this story relates to coverage already published.
+  const rel = story.historical_relation;
+  if (rel) {
+    html += `
+      <div class="edit-meta-row">
+        <dt>Historical dedup</dt>
+        <dd>${rel.decision === "duplicate" ? "Duplicate of" : "New development after"} #${rel.matched_story_id}
+          ${escapeHtml(rel.matched_title || "")} (similarity ${Number(rel.similarity).toFixed(2)}) -- ${escapeHtml(rel.reason || "")}</dd>
+      </div>
+    `;
+  }
+
   const facts = story.extracted_facts;
   if (facts && (facts.companies.length || facts.products.length || facts.events.length || facts.dates.length || facts.claims.length)) {
     const parts = [];
@@ -341,7 +353,7 @@ function wireCollectButton() {
 // ---------------------------------------------------------
 // Process Episode (dev/local only) -- fires POST /api/v1/episodes/
 // select, which is now the processing trigger (classify -> dedup ->
-// content-dedup -> verification -> rank/select -> produce -> QA, see
+// content-dedup -> historical-dedup -> verification -> rank/select -> produce -> QA, see
 // app/tasks/scheduled.py's run_daily_processing). Deliberately a
 // separate button/click from Collect New Stories above -- collection
 // and processing are two distinct operations and processing is never
@@ -367,13 +379,15 @@ function formatProcessSummary(result) {
   const c = result.classify || {};
   const d = result.dedup || {};
   const cd = result.content_dedup || {};
+  const hd = result.historical_dedup || {};
   const v = result.verification || {};
   const r = result.ranking || {};
 
   const lines = [
-    `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates`,
+    `Classify: ${c.classified ?? "?"} classified, ${c.ai_candidates ?? "?"} AI candidates, ${c.not_ai ?? "?"} not AI`,
     `Dedup: ${d.duplicates_found ?? "?"} duplicates found (of ${d.checked ?? "?"} checked)`,
-    `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates, ${cd.historical_repeats_found ?? "?"} historical repeats`,
+    `Content-dedup: ${cd.content_duplicates_found ?? "?"} content duplicates`,
+    `Historical-dedup: ${hd.duplicates ?? "?"} repeats of published stories, ${hd.new_developments ?? "?"} new developments`,
     `Verification: ${v.verified ?? "?"} verified / ${v.unverified ?? "?"} unverified`,
   ];
 
@@ -588,20 +602,16 @@ async function renderEpisodeList() {
           <button class="btn btn-small" id="classify-btn" type="button">1. Classify</button>
           <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
           <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
-          <button class="btn btn-small" id="verify-btn" type="button">4. Verify</button>
-          <button class="btn btn-small" id="rank-btn" type="button">5. Rank &amp; Select / Update</button>
+          <button class="btn btn-small" id="historical-dedup-btn" type="button">4. Historical-Dedup</button>
+          <button class="btn btn-small" id="verify-btn" type="button">5. Verify</button>
+          <button class="btn btn-small" id="rank-btn" type="button">6. Rank &amp; Select / Update</button>
         </div>
         <p id="classify-result" class="collect-result"></p>
         <p id="dedup-stage-result" class="collect-result"></p>
         <p id="content-dedup-result" class="collect-result"></p>
+        <p id="historical-dedup-result" class="collect-result"></p>
         <p id="verify-result" class="collect-result"></p>
         <p id="rank-result" class="collect-result"></p>
-
-        <p class="collect-stage-label">Storyboard prototype (story 51 only -- see TODO.md):</p>
-        <div class="collect-row">
-          <button class="btn btn-small" id="storyboard-prototype-btn" type="button">Generate Storyboard Video</button>
-        </div>
-        <p id="storyboard-prototype-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -612,7 +622,7 @@ async function renderEpisodeList() {
     wireProcessButton();
     wireStageButton({
       btnId: "classify-btn", resultId: "classify-result", path: "/processing/classify",
-      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates.`,
+      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates, ${r.not_ai ?? "?"} not AI.`,
     });
     wireStageButton({
       btnId: "dedup-stage-btn", resultId: "dedup-stage-result", path: "/processing/dedup",
@@ -622,7 +632,14 @@ async function renderEpisodeList() {
       btnId: "content-dedup-btn", resultId: "content-dedup-result", path: "/processing/content-dedup",
       formatResult: (r) =>
         `Fetched ${r.fetch_success ?? "?"}/${r.fetch_attempted ?? "?"} articles -- ` +
-        `${r.content_duplicates_found ?? "?"} content duplicates, ${r.historical_repeats_found ?? "?"} historical repeats.`,
+        `${r.content_duplicates_found ?? "?"} content duplicates.`,
+    });
+    wireStageButton({
+      btnId: "historical-dedup-btn", resultId: "historical-dedup-result", path: "/processing/historical-dedup",
+      formatResult: (r) => r.skipped_reason
+        ? `Skipped: ${escapeHtml(r.skipped_reason)}`
+        : `${r.duplicates ?? "?"} repeats of published stories, ${r.new_developments ?? "?"} new developments, ` +
+          `${r.already_decided ?? 0} already decided (of ${r.candidates ?? "?"} candidates).`,
     });
     wireStageButton({
       btnId: "verify-btn", resultId: "verify-result", path: "/processing/verify",
@@ -636,21 +653,6 @@ async function renderEpisodeList() {
           ? `${formatRankUpdate(r)}`
           : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
       onSuccess: () => renderEpisodeList(),
-    });
-    wireStageButton({
-      btnId: "storyboard-prototype-btn", resultId: "storyboard-prototype-result",
-      path: "/dev/storyboard-prototype/51",   // hardcoded for this prototype phase only
-      formatResult: (r) => {
-        if (r.status === "failed") return `Failed (${escapeHtml(r.stage || "?")}): ${escapeHtml(r.error || "")}`;
-        const qa = r.qa || [];
-        const passed = qa.filter((c) => c.passed).length;
-        const qaText = r.reused
-          ? "storyboard reused, no new QA run"
-          : `${passed}/${qa.length} QA checks passed`;
-        return `${escapeHtml(r.status)} -- ${r.scene_count ?? "?"} scenes ` +
-          `(${(r.scene_types || []).join(" → ")}), ${qaText}. ` +
-          `${escapeHtml(r.video_path || "")}`;
-      },
     });
   };
 
@@ -748,7 +750,7 @@ function formatElapsed(ms) {
 }
 
 // Visual workflow chart -- Collect -> Classify -> Dedup -> Content-
-// Dedup -> Verify -> Rank & Select -> Produce -> QA -> Approve ->
+// Dedup -> Historical-Dedup -> Verify -> Rank & Select -> Produce -> QA -> Approve ->
 // Publish, each stage's real current status/count for this episode's
 // date at a glance (ep.pipeline, from app.main._compute_pipeline_stages).
 // Complements, doesn't replace, the per-stage buttons and existing

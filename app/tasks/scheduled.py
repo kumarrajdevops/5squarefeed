@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, timezone
 
 from app.dates import target_collection_date
@@ -8,9 +9,12 @@ from app.tasks.content_dedup import enrich_and_dedup_by_content
 from app.tasks.dedup import deduplicate_new_stories
 from app.tasks.episode_qa import run_episode_qa
 from app.tasks.episode_video import produce_episode_video
+from app.tasks.historical_dedup import deduplicate_against_history
 from app.tasks.ranking import _run_ranking_selection
 from app.tasks.verification import run_fact_extraction_and_verification
 from app.worker.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task
@@ -19,7 +23,7 @@ def run_daily_processing(target_date_iso: str | None = None) -> dict:
     The "processing" half of the daily cycle (project.md's Daily
     Execution Architecture -- 4 AM IST, after the 10 PM/1 AM/3:30 AM
     IST collection passes have finished populating raw.news_items):
-    classify -> title-dedup -> content-dedup/historical-repeat ->
+    classify -> title-dedup -> content-dedup -> historical-dedup ->
     verification -> rank/select -> produce -> QA, for target_date.
 
     Collection and processing are deliberately separate operations
@@ -51,6 +55,12 @@ def run_daily_processing(target_date_iso: str | None = None) -> dict:
         classify_result = classify_new_raw_items(db, target_date)
         dedup_result = deduplicate_new_stories(db, target_date)
         content_dedup_result = enrich_and_dedup_by_content(db, target_date)
+        try:
+            historical_dedup_result = deduplicate_against_history(db, target_date)
+        except Exception as exc:  # a failing detector must not stop the day's episode
+            db.rollback()
+            logger.exception("[scheduled] historical dedup failed; continuing without it")
+            historical_dedup_result = {"error": f"{type(exc).__name__}: {exc}"}
         verification_result = run_fact_extraction_and_verification(db, target_date)
         ranking_result = _run_ranking_selection(db, target_date, now)
 
@@ -59,6 +69,7 @@ def run_daily_processing(target_date_iso: str | None = None) -> dict:
         "classify": classify_result,
         "dedup": dedup_result,
         "content_dedup": content_dedup_result,
+        "historical_dedup": historical_dedup_result,
         "verification": verification_result,
         "ranking": ranking_result,
     }

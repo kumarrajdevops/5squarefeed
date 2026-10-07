@@ -17,3 +17,5 @@ google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 trafilatura==1.12.2
 scikit-learn==1.5.2
+# Local sentence embeddings for historical duplicate detection (app/dedup); pulls onnxruntime, ~65 MB model downloaded once
+fastembed==0.8.1

@@ -20,11 +20,12 @@ explainable, nothing that can hallucinate or vary run to run:
 | Stage | How it works | AI/LLM involved? |
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
-| AI-relevance filter | Regex keyword matching against a fixed word list | No |
-| Deduplication | Title string-similarity + time window, plus full-article-text TF-IDF/cosine similarity (same-batch and against past narrated stories) | No |
+| Classification (AI relevance) | Deterministic, fully automated, binary rules gate (`rules-v3`): `ai_candidate` or `not_ai`. Non-news patterns reject; an AI term plus a concrete development is a candidate | No |
+| Deduplication | Title string-similarity + time window, then same-day content dedup (`same-day-v2`): pairs are judged by whether they report the same development (the historical rule ladder), with full-article TF-IDF/cosine only as corroboration | No |
+| Historical dedup | Local sentence embeddings (`fastembed`, `bge-small-en-v1.5`, ONNX CPU, no vector DB) plus deterministic rules decide whether a story reports a development already published; the same company/product alone is never a duplicate | No LLM (small local embedding model) |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
-| Verification (soft signal) | Cross-source count + source credibility threshold | No |
-| Ranking | A fixed scoring formula (recency, source credibility, momentum, verification) | No |
+| Verification (soft signal) | Distinct *other* outlets + source credibility threshold; every canonical story is re-assessed on each run | No |
+| Ranking | A fixed scoring formula (recency, source credibility, momentum, verification), applied per development: a duplicate group scores as its best viable article | No |
 | Script generation | String templates from the raw RSS/article text | No |
 | Voice synthesis | Microsoft's `edge-tts` neural voice (`en-US-JennyNeural`) | **Yes -- the one exception** |
 | Visual card | Pillow drawing text on a static template | No |
@@ -59,7 +60,12 @@ whether an article is about AI), never a call to an AI API.
   reflects the actual outlet
 - Deterministic duplicate-story detection, two layers:
   1. Title similarity + time window (fast, in-memory, same-batch only).
-  2. Full-article-text similarity (`app/content/article_extractor.py`
+  2. Same-day content dedup (`same-day-v2`, `app/dedup/same_day.py`): a pair
+     is a duplicate only when it reports the same development, using the
+     same rule ladder as historical dedup; TF-IDF is corroboration only,
+     and a thin or failed fetch never produces a duplicate verdict. The
+     day's draft selections are in the pool and are never demoted.
+  3. Full-article-text similarity (`app/content/article_extractor.py`
      fetches the linked article's real body via `trafilatura`;
      `app/filters/content_similarity.py` scores it with TF-IDF +
      cosine similarity, `scikit-learn` -- classic deterministic
@@ -82,12 +88,17 @@ whether an article is about AI), never a call to an AI API.
   numeric claims -- `app/extraction/fact_extractor.py`) and a
   Verification Engine (`app/verification/engine.py`: verified if
   corroborated by another outlet, or from a source credible enough to
-  be its own primary source) between dedup and ranking. **Soft signal
+  be its own primary source; only distinct *other* outlets count, and
+  every canonical story is re-assessed on each run so statuses never go
+  stale after a dedup change) between dedup and ranking. **Soft signal
   only** -- nothing is excluded from ranking; verification status is
   shown in the dashboard and gives ranking a small score nudge (same
   "surface prominently, human decides" philosophy as Automated QA).
 - Multi-factor ranking engine (recency, source credibility, AI
-  relevance, cross-source momentum, verification) + Top-25/5-backup
+  relevance, cross-source momentum, verification) scored per
+  *development* (a duplicate group scores as its best viable article;
+  momentum counts independent outlets; ties go to the lowest story id)
+  + Top-25/5-backup
   selection, persisted per run as an "Episode". A story that's already
   been a **primary** (narrated) selection in any earlier episode is
   never selected again, in any future episode -- an unused backup
@@ -141,7 +152,7 @@ a `celery beat` process:
 | 10:00 PM | Collect (RSS + Hacker News) into `raw.news_items` -- no editorial judgment yet |
 | 1:00 AM | Collect again (same `target_date`, repeatable/idempotent) |
 | 3:30 AM | Final collection |
-| 4:00 AM | **Process**: classify -> dedup -> content-dedup -> verification -> rank/select Top 25 + 5 backups -> produce the episode video -> run QA |
+| 4:00 AM | **Process**: classify -> dedup -> content-dedup -> historical-dedup -> verification -> rank/select Top 25 + 5 backups -> produce the episode video -> run QA |
 
 Collection and processing are deliberately separate operations --
 collecting never creates anything editorial by itself; processing is
@@ -207,7 +218,7 @@ same as the scheduled cycle) for `target_collection_date()` (today IST
 **Process Episode** calls `POST /api/v1/episodes/select` with no date
 (so it targets the same `target_collection_date()` Collect just used),
 which is the processing trigger described under "Running the pipeline"
-below -- classify -> dedup -> content-dedup -> verification ->
+below -- classify -> dedup -> content-dedup -> historical-dedup -> verification ->
 rank/select -> produce -> QA, all as one task. This can take several
 minutes (real video production, not just data processing) -- the
 button polls for up to 10 minutes and shows a summary of every stage's
@@ -245,8 +256,8 @@ curl "http://localhost:8000/api/v1/raw/collection-runs?collection_date=YYYY-MM-D
 ```
 
 **2. Process the episode.** Reads `raw.news_items` for the target date
-and runs classify -> title-dedup -> content-dedup/historical-repeat
-detection -> Fact Extraction + Verification -> rank/select the Top 25
+and runs classify -> title-dedup -> content-dedup -> historical-dedup
+(semantic) -> Fact Extraction + Verification -> rank/select the Top 25
 + 5 backups -> produce the episode video -> run Automated QA, all as
 one task (`app/tasks/scheduled.py`'s `run_daily_processing`). This is
 intentionally a separate, manually-triggered step from Collection --
@@ -282,10 +293,17 @@ selection, use the explicit reprocess endpoint instead of calling
 curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/reprocess
 ```
 
-Reprocess replaces that episode's story selection in place (never
-creates a second episode) and resets its `video_status`/`qa_status`
+Reprocess updates that episode in place (never creates a second
+episode; see below for how the selection is topped up) and resets its `video_status`/`qa_status`
 back to `pending`. It's blocked the same way for approved/published
 episodes -- there is no override.
+
+Re-running selection for an existing **draft** (reprocess, or a repeat of
+the daily processing task) never changes its rows: it only fills empty slots. Removing a
+story by hand (an `EpisodeStory` edit or a dashboard swap) therefore does not
+make it ineligible -- an empty slot could be refilled with it by a later
+reprocess. Stored ranking scores depend on the run's timestamp, so verify
+them by recomputing at that timestamp, not at the current time.
 
 ## Producing content (canonical enhanced Pillow/storyboard renderer)
 
@@ -477,7 +495,7 @@ not a generic browser tab.
   jump playback to roughly that point (computed from intro + preceding
   stories' narration durations).
 - **See the full pipeline at a glance** -- a workflow chart (Collect ->
-  Classify -> Dedup -> Content-Dedup -> Verify -> Rank & Select ->
+  Classify -> Dedup -> Content-Dedup -> Historical-Dedup -> Verify -> Rank & Select ->
   Produce -> QA -> Approve -> Publish) above the video, each stage's
   real status/count for that episode's date, derived live from
   existing data (no new schema). Complements, doesn't replace, the
@@ -785,12 +803,56 @@ succeeded -- `false` both when no webhook is configured and when the
 post itself fails; a Slack outage never breaks the pipeline's own
 failure handling, since delivery is always best-effort.
 
+## Classification and historical dedup
+
+**Classification** (`app/filters/classification_rules.py`, `rules-v3`, first
+processing stage). Fully automated and binary: each collected story becomes
+`ai_candidate` or `not_ai`, with the rule's reason stored on the row. The
+question it answers is "is this relevant AI news worth considering for the
+candidate pool?"; ranking decides the line-up and a human approves the episode
+after it is generated, not during classification. There is no review lane:
+the `ai_review` value is legacy (old rows only); the classify stage
+re-evaluates any leftover `ai_review` row from its title and summary into
+`ai_candidate` or `not_ai`. Development verbs are detected generically (verb
+stems with inflections, "will/to + verb", intent constructions, figures,
+versioned products, reported statements) rather than from a fixed list.
+Changing a pattern requires bumping `RULES_VERSION`. Evaluation data lives in
+`eval/classification/`; the read-only before/after replay is
+`python -m app.scripts.classification_replay --start-date YYYY-MM-DD`
+(writes `media/reports/classification_replay_*`).
+
+**Historical dedup** (`app/dedup/`, `app/tasks/historical_dedup.py`,
+`semantic-v1`, runs after same-day content dedup). A story is a duplicate
+only when it reports substantially the same development that was already
+published; sharing a company, product, model or topic is not enough
+("OpenAI adds image generation to Dots" is new after "OpenAI launches Dots";
+"OpenAI introduces Dots" is a duplicate). It compares against primaries of
+approved/published episodes with no time cutoff, never against raw, rejected,
+backup or unapproved-draft stories. Every decision (`duplicate` or
+`new_development`) is stored with its rule and reason in
+`editorial.historical_story_relations`; ranking excludes duplicates, and
+`editor_override` is reserved for future manual overrides. The first run
+loads a ~65 MB embedding model (about 28 s, downloaded once); if it is
+unavailable the stage is skipped and stories stay eligible.
+
+Read-only replay against the real database (changes nothing, writes a report
+to `media/reports/`):
+
+```bash
+docker compose exec -T api python -m app.scripts.dedup_replay                     # all dates
+docker compose exec -T api python -m app.scripts.dedup_replay --date 2026-10-05   # one date
+docker compose exec -T api python -m app.scripts.dedup_replay --limit 40          # sample
+```
+
+Viewing it: each story in an episode payload
+carries `historical_relation`, the story edit panel shows it, and the workflow
+chart has a Historical-Dedup stage. The stage can be run on its own with the
+**4. Historical-Dedup** button (`POST /api/v1/processing/historical-dedup`); run
+it after Content-Dedup so article text is available.
+
 ## Inspecting results
 
 ```bash
-# All AI-candidate stories, deduplicated (canonical only)
-curl http://localhost:8000/api/v1/stories
-
 # Every story grouped as a duplicate of a given canonical story
 curl http://localhost:8000/api/v1/stories/{story_id}/duplicates
 

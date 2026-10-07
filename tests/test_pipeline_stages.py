@@ -11,7 +11,8 @@ live status fields.
 from datetime import date, datetime, timezone
 
 from app.main import _compute_pipeline_stages
-from app.models import CollectionRun, Episode, NewsItem, StoryState
+from app.dedup.decision import METHOD_VERSION
+from app.models import CollectionRun, Episode, HistoricalStoryRelation, NewsItem, StoryState
 
 
 EPISODE_DATE = date(2026, 9, 29)
@@ -114,9 +115,32 @@ def test_processed_stories_show_real_counts_across_all_four_stages(db_session):
     assert _stage(stages, "classify")["status"] == "done"
     assert _stage(stages, "classify")["detail"] == "3 classified, 2 AI candidates"
     assert _stage(stages, "dedup")["detail"] == "1 duplicate(s) removed"
-    assert _stage(stages, "content_dedup")["detail"] == "1 article(s) fetched, 1 historical repeat(s)"
+    assert _stage(stages, "content_dedup")["detail"] == "1 article(s) fetched"
+    assert _stage(stages, "historical_dedup")["status"] == "pending"
     assert _stage(stages, "verify")["detail"] == "1 verified, 1 unverified"
     assert _stage(stages, "rank_select")["detail"] == "1 primary, 0 backup selected"
+
+
+def test_historical_dedup_stage_counts_repeats_and_new_developments(db_session):
+    episode = _make_episode(db_session)
+    old = _make_news_item(db_session, "old")
+    a = _make_news_item(db_session, "a")
+    b = _make_news_item(db_session, "b")
+    for item in (old, a, b):
+        db_session.add(StoryState(id=item.id, ai_relevance="ai_candidate", verification_status="pending"))
+    db_session.flush()
+    for story, decision in ((a, "duplicate"), (b, "new_development")):
+        db_session.add(HistoricalStoryRelation(
+            story_id=story.id, matched_story_id=old.id, decision=decision, semantic_similarity=0.9,
+            development_match="same", rule="r", reason="x", content_basis="full", method_version=METHOD_VERSION,
+        ))
+    db_session.commit()
+
+    stages = _compute_pipeline_stages(db_session, episode, primary_count=0, backup_count=0)
+
+    stage = _stage(stages, "historical_dedup")
+    assert stage["status"] == "done"
+    assert stage["detail"].startswith("1 repeat(s) held back, 1 new development(s)")
 
 
 def test_produce_status_reflects_video_status(db_session):
@@ -179,3 +203,18 @@ def test_rejected_and_publish_failed_are_hard_failures(db_session):
     publish = _stage(stages, "publish")
     assert publish["status"] == "failed"
     assert publish["detail"] == "quota exceeded"
+
+
+def test_classify_detail_reports_candidates_without_a_review_lane(db_session):
+    episode = _make_episode(db_session)
+    a = _make_news_item(db_session, "a")
+    b = _make_news_item(db_session, "b")
+    c = _make_news_item(db_session, "c")
+    db_session.add(StoryState(id=a.id, ai_relevance="ai_candidate"))
+    db_session.add(StoryState(id=b.id, ai_relevance="not_ai"))
+    db_session.add(StoryState(id=c.id, ai_relevance="not_ai"))
+    db_session.commit()
+
+    stages = _compute_pipeline_stages(db_session, episode, primary_count=0, backup_count=0)
+
+    assert _stage(stages, "classify")["detail"] == "3 classified, 1 AI candidates"
