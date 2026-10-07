@@ -371,7 +371,7 @@ def test_caption_cue_duration_fails_for_an_unsplittable_long_single_word_cue(tmp
 
 
 def test_caption_cue_word_count_fails_for_a_dense_fast_cue(tmp_path):
-    """25 real words, no clause markers to split at, spoken in a short real duration -- duration passes, word count fails."""
+    """25 real words, no clause marker and too short to split at a word boundary (halves under the minimum cue duration) -- duration passes, word count fails."""
     text = (
         "one two three four five six seven eight nine ten eleven twelve thirteen "
         "fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo "
@@ -379,8 +379,8 @@ def test_caption_cue_word_count_fails_for_a_dense_fast_cue(tmp_path):
     )
     storyboard = _fake_storyboard()
     storyboard["scenes"].insert(1, _well_segmented_scene(
-        narration_segments=[{"text": text, "start": 0.0, "end": 3.0}],
-        duration=3.0, end=3.0,
+        narration_segments=[{"text": text, "start": 0.0, "end": 1.9}],
+        duration=1.9, end=1.9,
     ))
     checks = run_storyboard_qa_checks(storyboard, tmp_path, tmp_path / "missing.mp4")
     assert _check(checks, "caption_cue_duration")["passed"] is True

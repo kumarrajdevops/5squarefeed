@@ -52,6 +52,22 @@ def test_unrelated_titles_are_not_duplicates():
     assert overlap < 0.35
 
 
+def test_shared_template_wording_does_not_merge_stories_about_different_companies():
+    is_dup, seq, _ = is_likely_duplicate_title(
+        "OpenAI admits misstep in handling AI agent interactions with Australian government sites – video",
+        "Anthropic says AI agents didn’t breach Australian government websites – video",
+    )
+    assert seq >= 0.55 and not is_dup
+
+
+def test_same_company_in_both_titles_still_merges():
+    is_dup, _, _ = is_likely_duplicate_title(
+        "OpenAI admits misstep in handling AI agent interactions with Australian government sites",
+        "OpenAI admits misstep in AI agent interactions with Australian government websites",
+    )
+    assert is_dup
+
+
 @dataclass
 class FakeStory:
     id: int

@@ -10,6 +10,7 @@ produces a duplicate on lexical overlap alone.
 Pure and deterministic: stories in, links out. The stage (app/tasks/content_dedup.py) persists them
 on the existing StoryState.canonical_story_id / dedup_reason columns.
 """
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -27,7 +28,9 @@ from app.filters.content_similarity import (
 from app.filters.dedup import TIME_WINDOW_HOURS
 from app.ranking.engine import compute_total_score
 
-SAME_DAY_VERSION = "same-day-v2"
+SAME_DAY_VERSION = "same-day-v3"
+
+BARE_HEADLINE_RULE = "bare_headline_report"
 
 # A pair the headline rules cannot call (development_unconfirmed) or that agrees on the kind of
 # development but falls just short on similarity (insufficient_overlap) is still the same report when
@@ -91,11 +94,33 @@ def _types_conflict(new: StoryFeatures, old: StoryFeatures) -> bool:
     return bool(n and o and not (n & o))
 
 
+def _normalized(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _bare_headline_report(thin: StoryFeatures, full: StoryFeatures) -> bool:
+    """`thin` has no article text and its whole headline only names a subject ("Mistral Large 4",
+    no development verb); `full` has article text and states that subject in its own headline or
+    lead. The bare headline carries no development of its own, so it is the same report."""
+    if thin.article.quality != "title_only" or full.article.quality == "title_only":
+        return False
+    if {t for t in thin.types if t != "other"}:
+        return False
+    name = _normalized(thin.title)
+    return len(name.split()) >= 2 and name in _normalized(full.head_lower)
+
+
 def judge_pair(new: StoryFeatures, old: StoryFeatures, semantic: float, title_similarity: float,
                tfidf: float) -> PairVerdict:
     d = decide(new, old, semantic, title_similarity)
     if d.is_duplicate:
         return PairVerdict(True, d.rule, d.reason)
+    if d.related and (_bare_headline_report(new, old) or _bare_headline_report(old, new)):
+        return PairVerdict(
+            True, BARE_HEADLINE_RULE,
+            "One story has no article text and its headline only names a subject the other story "
+            "reports on, so it adds no development of its own.",
+        )
     if (
         d.rule in CORROBORATED_RULES
         and d.content_basis == "full"
@@ -193,9 +218,9 @@ def cluster_same_day(stories: list[DayStory], pinned: set[int], embedder: Embedd
             continue
 
         other, semantic, lexical, verdict = best
-        if (
-            other.story_id not in pinned
-            and _rank_score(story, reference) - _rank_score(other, reference) > ELECTION_MARGIN
+        text_wins = verdict.rule == BARE_HEADLINE_RULE and story.features.article.quality != "title_only"
+        if other.story_id not in pinned and (
+            text_wins or _rank_score(story, reference) - _rank_score(other, reference) > ELECTION_MARGIN
         ):
             # The newer copy would rank higher: it becomes the canonical, so the event is not lost
             # when the older copy is cut by ranking. Everything that pointed at the old one follows.

@@ -159,3 +159,21 @@ def test_wrap_caption_text_keeps_a_realistic_cue_within_the_max_line_budget():
     text = "By 2035, ABI Research projects an installed base of 49 million level 3-5 autonomous vehicles (AVs),"
     wrapped = _wrap_caption_text(text)
     assert len(wrapped.split("\n")) <= CAPTION_MAX_LINES
+
+
+HEADLINE_NO_CLAUSE = "OpenAI Publicist Tries to Shut Down Interviewer When Sam Altman Is Asked About Woman Who Killed Herself After Talking to ChatGPT."
+
+
+def test_over_budget_cue_with_no_clause_marker_is_split_at_a_word_boundary():
+    cues = _split_long_cue(HEADLINE_NO_CLAUSE, start=0.0, end=8.2)
+    assert len(cues) == 2
+    assert " ".join(cue["text"] for cue in cues).split() == HEADLINE_NO_CLAUSE.split()
+    for cue in cues:
+        assert len(cue["text"].split()) <= MAX_WORDS_PER_CUE
+        assert cue["end"] - cue["start"] <= MAX_CUE_DURATION_SECONDS
+    assert cues[0]["end"] == cues[1]["start"] and cues[-1]["end"] == 8.2
+
+
+def test_word_fallback_can_be_disabled_and_never_splits_a_single_word():
+    assert len(_split_long_cue(HEADLINE_NO_CLAUSE, 0.0, 8.2, word_fallback=False)) == 1
+    assert len(_split_long_cue("Supercalifragilistic", 0.0, 9.0)) == 1

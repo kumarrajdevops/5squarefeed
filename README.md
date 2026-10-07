@@ -21,7 +21,7 @@ explainable, nothing that can hallucinate or vary run to run:
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
 | Classification (AI relevance) | Deterministic, fully automated, binary rules gate (`rules-v3`): `ai_candidate` or `not_ai`. Non-news patterns reject; an AI term plus a concrete development is a candidate | No |
-| Deduplication | Title string-similarity + time window, then same-day content dedup (`same-day-v2`): pairs are judged by whether they report the same development (the historical rule ladder), with full-article TF-IDF/cosine only as corroboration | No |
+| Deduplication | Title string-similarity + time window, then same-day content dedup (`same-day-v3`): pairs are judged by whether they report the same development (the historical rule ladder), with full-article TF-IDF/cosine only as corroboration | No |
 | Historical dedup | Local sentence embeddings (`fastembed`, `bge-small-en-v1.5`, ONNX CPU, no vector DB) plus deterministic rules decide whether a story reports a development already published; the same company/product alone is never a duplicate | No LLM (small local embedding model) |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
 | Verification (soft signal) | Distinct *other* outlets + source credibility threshold; every canonical story is re-assessed on each run | No |
@@ -60,10 +60,13 @@ whether an article is about AI), never a call to an AI API.
   reflects the actual outlet
 - Deterministic duplicate-story detection, two layers:
   1. Title similarity + time window (fast, in-memory, same-batch only).
-  2. Same-day content dedup (`same-day-v2`, `app/dedup/same_day.py`): a pair
+  2. Same-day content dedup (`same-day-v3`, `app/dedup/same_day.py`): a pair
      is a duplicate only when it reports the same development, using the
      same rule ladder as historical dedup; TF-IDF is corroboration only,
-     and a thin or failed fetch never produces a duplicate verdict. The
+     and a thin or failed fetch never produces a duplicate verdict, except
+     for a headline that only names a subject (no development verb) which
+     another story's lead already reports. The title step will not merge two
+     headlines that name different companies. The
      day's draft selections are in the pool and are never demoted.
   3. Full-article-text similarity (`app/content/article_extractor.py`
      fetches the linked article's real body via `trafilatura`;

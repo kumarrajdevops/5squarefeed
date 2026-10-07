@@ -93,7 +93,7 @@ def enrich_and_dedup_by_content(db, target_date, embedder=None) -> dict:
        whatever today's cheap title-only pass (app/tasks/dedup.py)
        didn't already resolve, scoped to target_date -- catches
        cross-outlet duplicates under completely different headlines.
-       Judged by app/dedup/same_day.py (same-day-v2: the historical
+       Judged by app/dedup/same_day.py (same-day-v3: the historical
        rule ladder + TF-IDF only as corroboration; the day's episode
        selections are in the pool and never demoted). Sets the SAME canonical_story_id/dedup_reason columns
        title-dedup uses, so verification's duplicate_count and
