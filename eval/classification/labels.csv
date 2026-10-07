@@ -1,0 +1,358 @@
+id,tech,ai,ctype,aud,exp,conf,tags,note
+440,y,core,dev,h,cand,h,policy_safety,OpenAI safety employee resigns
+441,y,core,round,m,rej,m,ai_nonnews,listicle of agents
+442,y,core,dev,h,cand,h,"name_gap,oss_project",Meta Muse code released
+443,y,core,dev,m,cand,m,,company move
+444,n,none,deal,l,rej,h,ai_nonnews,conference pass deal
+445,y,core,opin,m,rev,m,,studio statement about AI in games
+446,y,core,opin,l,rej,m,ai_nonnews,CEO opinion on AI emails
+447,y,core,dev,h,cand,h,policy_safety,dup of 440
+448,y,core,rel,h,cand,h,"name_gap,oss_project",Meta open sources Muse gadget code
+449,y,core,dev,h,cand,h,policy_safety,Apple limits disk access for agents
+450,y,core,dev,h,cand,h,policy_safety,dup of 449
+451,y,adj,dev,m,rev,m,chips_infra,data center backlash
+452,y,adj,dev,m,rev,m,"chips_infra,policy_safety",chip smuggling arrest
+453,y,none,deal,l,rej,m,ai_nonnews,consumer hardware price hike
+454,y,core,dev,h,cand,m,name_gap,Muse privacy profiles
+455,n,none,other,l,rej,h,,museum blog post
+456,y,core,dev,h,cand,h,oss_project,Pop OS bans AI code
+457,y,core,opin,m,rev,m,,LeCun statement
+458,y,core,dev,m,rev,m,policy_safety,AI video in court
+459,y,core,dev,m,cand,m,implicit,agent emailed researchers
+460,n,none,other,l,rej,h,,aviation report
+461,y,core,proj,m,cand,m,oss_project,Show HN Lego AI generator
+462,y,core,proj,h,cand,h,"oss_project,name_gap",Muse Gadgets
+463,y,core,proj,h,cand,h,oss_project,coding agent sandboxes
+464,y,core,dev,h,cand,h,policy_safety,dup of 449
+465,y,core,dev,m,cand,m,policy_safety,US AI task force
+466,y,adj,dev,m,rev,m,chips_infra,AWS data center backlash
+467,y,core,other,l,rej,m,ai_nonnews,AI used in a PR statement
+468,y,core,res,m,cand,m,,StarCraft bot benchmark
+469,y,core,bg,m,rev,l,"implicit,thin",agent reliability post with empty summary
+470,y,adj,dev,l,rev,l,"chips_infra,policy_safety",data center tax break
+471,y,core,opin,m,rev,m,implicit,budget caps for AI spend
+472,n,none,spons,l,rej,h,thin,sponsors newsletter
+473,y,core,tut,h,rev,m,oss_project,engineering post part 1
+474,y,core,bg,l,rej,m,ai_nonnews,bootcamp reflection
+475,y,core,dev,m,rev,m,,game company AI policy
+476,y,core,proj,m,cand,m,oss_project,Show HN photo search
+477,y,core,spons,l,rej,m,"thin,ai_nonnews",talk/video promo
+478,y,core,opin,l,rej,m,ai_nonnews,culture debate
+479,y,core,opin,m,rev,m,,essay on math and AI
+480,y,core,opin,l,rej,m,"thin,ai_nonnews",opinion
+481,n,core,dev,l,rev,l,thin,religion and Anthropic
+482,y,core,dev,h,cand,h,policy_safety,dup of 440
+483,y,core,dev,l,rev,l,thin,Anthropic and the Pope
+484,y,core,opin,l,rev,l,thin,"guest post, unclear"
+485,n,none,other,l,rej,h,,aviation
+486,y,core,dev,m,cand,m,policy_safety,dup of 465
+487,y,core,res,h,cand,h,implicit,agent self-improvement research
+488,y,core,rel,h,cand,h,,open-source foundation model
+489,y,core,res,m,cand,m,policy_safety,study of model answers
+490,y,core,dev,h,cand,h,,Gemini tier change
+491,y,core,opin,m,rev,l,policy_safety,Altman statement
+492,y,core,dev,m,cand,m,policy_safety,AI czar named
+493,y,adj,other,l,rej,m,chips_infra,local datacentre story
+494,y,core,bg,m,rej,m,ai_nonnews,AI jobs analysis
+495,y,core,dev,h,cand,h,policy_safety,dup of 440
+496,y,core,round,l,rej,m,ai_nonnews,podcast episode
+497,n,none,other,l,rej,h,,not tech
+498,y,core,dev,l,rev,l,,Anthropic and the Vatican
+499,n,none,other,l,rej,h,,not tech
+500,y,core,opin,m,rej,m,ai_nonnews,opinion on AI economy
+501,y,core,other,l,rej,m,ai_nonnews,AI slop on social media
+502,n,none,other,l,rej,h,,not tech
+503,y,core,opin,l,rej,m,ai_nonnews,economy forecast
+504,n,none,other,l,rej,h,,not tech
+505,n,none,other,l,rej,m,,biology
+506,y,none,other,l,rej,m,nonai_tech,consumer GPU fix
+507,y,adj,dev,m,rev,m,robot_emerging,robot cage match
+508,y,none,proj,m,rev,m,"nonai_tech,oss_project",retro driver port
+509,y,none,proj,m,cand,m,"nonai_tech,oss_project",Doom in SQL
+510,y,adj,dev,l,rej,m,robot_emerging,military drone
+511,y,core,dev,m,rev,m,robot_emerging,Figure robots decommissioned
+512,y,core,dev,m,cand,m,name_gap,model decodes cipher
+513,y,none,dev,l,rej,m,,generic security
+514,n,none,other,l,rej,h,,not tech
+515,y,adj,other,l,rej,m,chips_infra,data center PR
+516,y,core,opin,l,rej,m,ai_nonnews,culture debate
+517,y,none,proj,m,rev,m,"nonai_tech,oss_project",experimental keyboard
+518,y,none,dev,l,rej,m,,military
+519,y,core,proj,h,cand,h,"oss_project,name_gap",LEGO design tool
+520,n,none,other,l,rej,h,,consumer gadget
+521,y,core,dev,m,cand,m,implicit,vibe-coded game
+522,y,adj,dev,m,rev,m,"implicit,robot_emerging",robotaxi limitation
+523,y,none,dev,m,rev,m,"robot_emerging,nonai_tech",solid-state batteries
+524,y,core,opin,m,rej,m,policy_safety,executive warning
+525,y,core,dev,m,cand,m,policy_safety,dup of 465
+526,y,none,dev,l,rej,m,,geopolitics
+527,y,core,opin,l,rej,m,ai_nonnews,opinion on listening
+528,y,adj,dev,m,rev,m,"chips_infra,policy_safety",AI server smuggling charge
+529,y,none,opin,l,rej,m,,central bank warning
+530,y,core,dev,h,cand,h,policy_safety,dup of 440
+531,y,adj,dev,m,rev,m,chips_infra,AI data center grid delay
+532,n,none,rev,l,rej,h,,game review
+533,n,none,other,l,rej,h,,stream guide
+534,y,none,rev,l,rej,h,,review
+535,n,none,other,l,rej,h,,stream guide
+536,n,none,other,l,rej,h,,stream guide
+537,y,core,rel,h,cand,m,implicit,security tool for agents
+538,n,none,other,l,rej,h,,game
+539,n,none,other,l,rej,h,,stream guide
+540,y,core,dev,h,cand,h,,dup of 490
+541,n,none,other,l,rej,h,,TV
+542,y,none,opin,l,rej,m,nonai_tech,OS opinion
+543,n,none,other,l,rej,h,,quiz
+544,n,none,other,l,rej,h,,stream guide
+545,n,none,other,l,rej,h,,stream guide
+546,y,none,rev,l,rej,h,,review
+547,y,none,dev,l,rej,m,,generic security report
+548,n,none,other,l,rej,h,,stream guide
+549,n,none,other,l,rej,h,,game
+550,y,none,rev,m,rej,m,nonai_tech,"first Wi-Fi 8 router, review style"
+551,n,none,other,l,rej,h,,puzzle
+552,n,none,other,l,rej,h,,puzzle
+553,n,none,other,l,rej,h,,puzzle
+554,n,none,rev,l,rej,h,,game preview
+555,n,none,other,l,rej,h,,stream guide
+556,y,core,opin,m,rev,l,,practitioner statement
+557,y,adj,dev,m,rev,m,"chips_infra,robot_emerging",nuclear power for data center
+558,y,none,rev,l,rej,h,,review
+559,n,none,other,l,rej,h,,stream guide
+560,y,none,other,l,rej,m,nonai_tech,consumer power station
+561,y,core,opin,m,rej,m,policy_safety,policy figure opinion
+562,n,none,other,l,rej,h,,lifestyle
+563,n,none,other,l,rej,h,,lifestyle
+564,n,none,other,l,rej,h,,lifestyle
+565,n,none,other,l,rej,h,,lifestyle
+566,n,none,other,l,rej,h,,lifestyle
+567,n,none,other,l,rej,h,,lifestyle
+568,n,none,other,l,rej,h,,lifestyle
+569,y,adj,other,l,rej,m,,hiring comment
+570,n,none,other,l,rej,h,,lifestyle
+571,y,core,other,l,rej,m,"name_gap,ai_nonnews",personal AI use story
+572,n,none,other,l,rej,h,,lifestyle
+573,n,none,other,l,rej,h,,lifestyle
+574,n,none,other,l,rej,h,,lifestyle
+575,y,core,bg,m,rej,m,ai_nonnews,job market analysis
+576,n,none,other,l,rej,h,,health
+577,n,none,other,l,rej,h,,lifestyle
+578,y,none,dev,l,rej,m,,game announcement
+579,y,none,tut,l,rej,h,,explainer
+580,y,none,tut,l,rej,h,,explainer
+581,y,core,dev,m,cand,m,policy_safety,dup of 465
+582,y,core,tut,m,rej,h,"name_gap,ai_nonnews",how-to disable Apple Intelligence
+583,y,none,tut,l,rej,h,,how-to
+584,y,none,tut,l,rej,h,,explainer
+585,y,none,tut,l,rej,h,,explainer
+586,y,core,round,m,rej,m,ai_nonnews,conference insights roundup
+587,y,core,tut,m,rev,l,implicit,guide to governing agents
+588,y,core,bg,m,rej,m,ai_nonnews,explainer on a known effect
+589,y,core,dev,h,cand,h,"oss_project,name_gap",Muse Gadgets
+590,y,core,dev,h,cand,h,policy_safety,OpenAI safety departure
+591,y,core,res,h,cand,h,,DeepMind research proposal
+592,y,core,proj,h,cand,h,oss_project,BootLoops harness
+593,y,core,dev,m,cand,m,policy_safety,California AI workplace laws
+594,n,none,other,l,rej,h,,ticket tips
+595,y,core,dev,h,cand,h,policy_safety,OpenAI hacks review cost
+596,n,core,rev,l,rej,h,ai_nonnews,play review
+597,y,core,res,h,cand,h,policy_safety,AI exposes ballots
+598,y,adj,dev,m,rev,m,"chips_infra,policy_safety",server smuggling arrest
+599,y,core,round,l,rej,m,"thin,ai_nonnews",newsletter with no content
+600,y,core,round,h,rev,m,,podcast digest of model releases
+601,y,adj,other,l,rej,l,,surveillance human interest
+602,n,none,opin,l,rej,h,,prediction markets opinion
+603,y,adj,dev,m,rev,m,,Google guideline on AI headshots
+604,y,core,opin,m,rev,l,policy_safety,poll on pausing AI
+605,y,core,opin,m,rej,m,ai_nonnews,opinion on AI in schools
+606,y,core,opin,l,rej,m,ai_nonnews,culture opinion
+607,n,none,other,l,rej,h,,pet incinerator ads
+608,y,core,opin,h,rev,m,implicit,AI code humans cannot understand
+609,y,adj,dev,l,rej,m,chips_infra,tax avoidance by data centers
+610,y,adj,dev,m,rev,m,robot_emerging,robot cage fights stopped
+611,y,adj,dev,m,rev,m,chips_infra,data center forest
+612,n,none,other,l,rej,h,,influencer
+613,y,none,deal,l,rej,m,ai_nonnews,Shield TV price hike
+614,y,adj,dev,h,cand,m,chips_infra,Musk TSMC Terafab
+615,y,none,deal,l,rej,h,,deals
+616,y,none,other,l,rej,h,nonai_tech,anti-cheat CPU
+617,y,adj,round,m,rej,m,ai_nonnews,premium digest
+618,n,none,other,l,rej,h,,Steam revenue
+619,y,core,res,h,cand,h,,agent token usage data
+620,y,none,deal,l,rej,h,,sale
+621,y,none,dev,m,rev,l,nonai_tech,router vulnerability
+622,y,core,dev,h,cand,h,"oss_project,policy_safety",bug bounty frozen over AI slop
+623,y,none,other,l,rej,h,,consumer hardware failure
+624,y,core,dev,h,cand,h,policy_safety,subpoena over rogue agents
+625,y,adj,dev,m,rev,m,chips_infra,dup theme of 451
+626,y,none,bg,l,rej,m,nonai_tech,unreleased CPU trivia
+627,y,core,dev,m,cand,m,name_gap,model plays WoW via Codex
+628,y,core,opin,m,rej,m,policy_safety,official's opinion
+629,y,adj,other,l,rej,m,chips_infra,local data center siting
+630,n,none,rev,l,rej,h,,review
+631,y,none,rev,l,rej,h,,phone comparison
+632,n,none,other,l,rej,h,,blu-rays
+633,y,none,rev,l,rej,h,,review
+634,y,none,tut,l,rej,h,,how-to
+635,n,none,other,l,rej,h,,stream guide
+636,n,none,rev,l,rej,h,,car review
+637,y,adj,dev,m,rev,l,policy_safety,surveillance legislation
+638,n,none,rev,l,rej,h,,game preview
+639,y,core,rev,m,rev,l,name_gap,Googlebooks vs Chromebooks
+640,n,none,other,l,rej,h,,stream guide
+641,y,adj,dev,m,cand,m,chips_infra,UK AI supercomputer delayed
+642,y,core,dev,m,cand,h,robot_emerging,robotics AI funding
+643,y,core,spons,m,rev,m,,partnership marketing
+644,y,core,dev,m,cand,m,implicit,storage ops by agents
+645,y,core,dev,m,cand,m,chips_infra,agent workload isolation
+646,y,core,res,m,rev,m,,blog essay on agent creativity
+647,y,core,tut,m,rej,h,ai_nonnews,PyTorch how-to
+648,n,none,other,l,rej,m,,aerospace history
+649,y,core,res,m,rev,m,oss_project,agent comparison
+650,y,adj,dev,m,rev,m,"chips_infra,policy_safety",chip smuggling arrest
+651,y,core,dev,m,cand,m,policy_safety,OpenAI EU watermarking
+652,y,core,dev,m,cand,m,name_gap,ChatGPT ad format
+653,y,core,dev,l,rev,m,name_gap,"TikTok shopping agent, consumer"
+654,y,core,other,l,rej,m,ai_nonnews,startup profile dating advice
+655,y,core,dev,m,rev,m,,AI interviewer scale
+656,y,core,dev,m,cand,m,name_gap,dup of 652
+657,y,core,event,l,rej,h,ai_nonnews,conference promo
+658,y,core,dev,h,cand,h,"implicit,policy_safety",agent swarm found by researchers
+659,n,none,event,l,rej,h,ai_nonnews,conference promo
+660,n,none,event,l,rej,h,ai_nonnews,conference promo
+661,y,core,dev,m,rev,m,"robot_emerging,name_gap",startup profile GenAI robots
+662,y,core,dev,h,cand,h,"oss_project,policy_safety",dup of 622
+663,y,core,round,l,rej,m,ai_nonnews,podcast episode
+664,y,core,dev,h,cand,h,"name_gap,policy_safety",ChatGPT/Codex watermark
+665,y,core,other,l,rej,m,name_gap,PR controversy
+666,y,core,opin,m,rev,m,policy_safety,Altman statement
+667,y,core,opin,l,rej,m,policy_safety,politician interview
+668,y,core,proj,m,cand,m,"name_gap,oss_project",RemoveMacAI open-source tool
+669,y,core,dev,m,cand,m,name_gap,dup of 652
+670,y,core,spons,l,rej,h,ai_nonnews,sponsored enterprise content
+671,y,core,spons,l,rej,h,ai_nonnews,sponsored enterprise content
+672,y,core,opin,l,rej,m,ai_nonnews,opinion column
+673,y,core,event,l,rej,h,ai_nonnews,event promo
+674,y,core,spons,l,rej,m,ai_nonnews,vendor blog healthcare
+675,y,adj,dev,m,rev,m,"policy_safety,robot_emerging",AI glasses regulation
+676,y,core,res,m,cand,m,name_gap,model experiment write-up
+677,y,core,opin,m,rej,m,ai_nonnews,guidelines essay
+678,y,core,res,m,rev,m,implicit,agent oversight analysis
+679,y,core,dev,h,cand,m,,AI solves math problem
+680,y,core,rel,h,cand,h,robot_emerging,omni-model release
+681,y,core,dev,h,cand,h,"name_gap,policy_safety",dup of 664
+682,y,core,opin,m,rev,m,policy_safety,poll
+683,y,core,dev,l,rev,l,,donor spending
+684,y,core,rel,h,cand,h,,open-weight model release
+685,y,core,dev,m,cand,m,name_gap,dup of 652
+686,y,core,res,m,rev,l,ai_nonnews,education report
+687,y,core,dev,m,rev,m,policy_safety,monitor report
+688,n,none,opin,l,rej,h,,editorial not tech
+689,y,core,dev,m,rev,m,policy_safety,parliament hearing
+690,y,core,opin,m,rev,m,policy_safety,dup of 666
+691,n,none,opin,l,rej,h,ai_nonnews,politics column
+692,y,core,opin,m,rev,m,name_gap,model welfare analysis
+693,y,core,dev,m,rev,l,name_gap,voters asking ChatGPT
+694,y,core,opin,m,rev,m,policy_safety,dup of 666
+695,y,adj,dev,m,rev,m,"robot_emerging,implicit",robotaxi limitation
+696,y,adj,dev,m,rev,m,chips_infra,data center community
+697,y,core,dev,m,rev,m,policy_safety,hackers impersonate employee
+698,y,core,dev,m,rev,m,implicit,dynamic pricing with AI
+699,y,none,deal,l,rej,h,ai_nonnews,console deal
+700,y,none,deal,l,rej,h,,deals
+701,y,none,deal,l,rej,h,,deal
+702,y,none,dev,l,rej,m,nonai_tech,app compatibility
+703,y,adj,dev,l,rej,m,chips_infra,vendor benchmarks
+704,y,none,deal,l,rej,h,,deal
+705,y,adj,dev,m,rev,m,chips_infra,chip rental deal
+706,y,none,other,l,rej,h,,gaming survey
+707,y,none,proj,m,rev,m,"nonai_tech,oss_project",emulator port
+708,y,adj,dev,m,rev,m,chips_infra,data center commitments
+709,y,adj,dev,l,rev,l,chips_infra,forest clearing
+710,y,core,opin,m,rev,m,policy_safety,safety culture critique
+711,y,core,proj,m,rev,m,"implicit,oss_project",solo port using AI
+712,y,none,dev,m,rev,l,chips_infra,export controls
+713,y,adj,dev,m,rev,m,chips_infra,AWS CEO warning
+714,y,none,dev,l,rej,m,nonai_tech,chipmaking tool
+715,y,adj,dev,m,rev,m,"chips_infra,policy_safety",Senate vote
+716,y,none,other,l,rej,h,nonai_tech,repair video
+717,y,none,other,l,rej,h,,OS anniversary
+718,y,core,dev,m,rev,m,"name_gap,policy_safety",Claude threat report
+719,y,adj,dev,m,rev,m,robot_emerging,uncrewed tank failure
+720,y,none,deal,l,rej,h,,deals
+721,y,adj,dev,m,rev,m,"chips_infra,policy_safety",poll data centers
+722,n,none,dev,l,rej,h,,EV sales
+723,y,none,deal,l,rej,h,,laptop deal
+724,y,core,res,l,rej,m,ai_nonnews,workplace survey
+725,n,none,rev,l,rej,h,,coffee maker
+726,y,none,dev,l,rej,m,,account hijack scam
+727,y,adj,dev,m,rev,m,policy_safety,surveillance ruling
+728,n,none,other,l,rej,h,,stream guide
+729,n,none,rev,l,rej,h,,vacuum review
+730,y,none,other,l,rej,m,nonai_tech,rumor
+731,n,none,other,l,rej,h,,stream guide
+732,n,none,deal,l,rej,h,,pen deal
+733,y,none,other,l,rej,m,,phishing scams
+734,n,none,deal,l,rej,h,,heater deal
+735,y,none,deal,l,rej,h,,deals
+736,y,core,dev,h,cand,h,"oss_project,policy_safety",dup of 622
+737,y,none,deal,l,rej,h,,camera deal
+738,y,none,deal,l,rej,h,,watch deal
+739,y,none,deal,l,rej,h,,laptop deal
+740,y,none,deal,l,rej,h,,laptop deal
+741,y,none,deal,l,rej,h,,audio deals
+742,y,none,deal,l,rej,h,,SSD deal
+743,n,none,rev,l,rej,h,,coffee maker
+744,y,core,dev,h,cand,h,policy_safety,dup of 449
+745,y,adj,dev,m,rev,m,"policy_safety,robot_emerging",smart glasses retailer
+746,y,none,deal,l,rej,h,,deals
+747,y,none,dev,l,rej,m,,OS bug
+748,y,none,deal,l,rej,h,,deal
+749,y,none,deal,l,rej,h,,deal
+750,y,none,deal,l,rej,h,,console deal
+751,y,none,deal,l,rej,h,,headphones deal
+752,y,core,res,m,rev,m,name_gap,scraping ranking
+753,y,none,deal,l,rej,h,,deals
+754,n,none,other,l,rej,h,,wind turbine
+755,y,none,deal,l,rej,h,,TV deal
+756,n,none,other,l,rej,h,,colleges
+757,y,core,other,l,rej,m,ai_nonnews,personal feud
+758,n,none,other,l,rej,h,,human interest
+759,n,none,other,l,rej,h,,travel
+760,y,core,dev,m,rev,m,name_gap,executive hire
+761,y,adj,dev,m,rev,m,"policy_safety,robot_emerging",dup of 675
+762,n,none,other,l,rej,h,,side hustle
+763,n,none,other,l,rej,h,,music
+764,n,none,other,l,rej,h,,personal
+765,n,none,other,l,rej,h,,politics
+766,n,none,other,l,rej,h,,restaurant
+767,y,none,other,l,rej,m,,in-flight wifi
+768,n,none,other,l,rej,h,,retail
+769,y,none,rev,l,rej,h,,wearable comparison
+770,n,none,dev,l,rej,h,,car
+771,y,none,tut,l,rej,h,,explainer
+772,n,none,other,l,rej,h,,cinema
+773,y,none,dev,l,rej,m,,antitrust
+774,y,adj,dev,m,rev,m,robot_emerging,drone delivery
+775,y,none,tut,l,rej,h,,explainer
+776,y,none,tut,l,rej,h,,how-to
+777,y,core,dev,m,cand,m,name_gap,dup of 652
+778,y,core,tut,m,rej,m,"name_gap,ai_nonnews",how-to limit Siri
+779,y,core,event,l,rej,h,ai_nonnews,summit promo
+780,y,core,rel,h,cand,h,,inference engine launch
+781,y,core,rel,h,cand,h,,agent platform release
+782,y,core,rel,m,cand,m,,personal AI platform launch
+783,y,core,bg,l,rej,m,ai_nonnews,sponsored-style feature
+784,y,core,bg,m,rev,l,"robot_emerging,ai_nonnews",physical AI analysis
+785,y,adj,tut,m,rej,h,"nonai_tech,ai_nonnews",CV algorithm tutorial
+786,y,core,tut,m,rej,m,"implicit,ai_nonnews",how-to model router
+787,y,core,res,m,cand,m,"name_gap,thin",model solves cipher
+788,y,core,dev,m,rev,m,"name_gap,policy_safety",dup of 718
+789,y,core,dev,m,rev,l,name_gap,dup of 693
+790,y,core,opin,m,rev,m,policy_safety,dup of 666
+791,y,core,opin,l,rej,m,ai_nonnews,video opinion
+792,y,core,bg,m,rej,m,ai_nonnews,cost commentary
+793,y,core,opin,m,rev,m,policy_safety,dup of 666
+794,y,core,other,l,rej,m,thin,survey request
+795,y,core,opin,m,rev,m,policy_safety,risk analysis
+796,y,adj,res,m,rev,l,"chips_infra,thin",video of paper
