@@ -224,6 +224,12 @@ Don't re-diagnose from scratch.
   pattern, bump the version and re-run `python -m app.scripts.dedup_replay`
   (read-only) before trusting the change; never edit rows in
   `editorial.historical_story_relations` by hand -- set `editor_override`.
+- Re-running ranking/reprocess for a draft episode only fills EMPTY slots and keeps
+  existing rows, so a story removed by hand (EpisodeStory edit) that is still an eligible
+  canonical comes back on a reprocess. Event scores depend on `now`: to verify stored
+  `rank_score`s, recompute at the run's own timestamp, not the current time. Edit
+  `EpisodeStory` rows on parked negative positions (unique `(episode_id, rank_position)` is
+  checked per statement) and back up the episode tables first.
 
 - YouTube OAuth consent screen must be set to **"In production"** (Publish app) in
   each Google Cloud project, dev and prod. In "Testing" status the refresh token
