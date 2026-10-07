@@ -72,6 +72,17 @@ def token_overlap_ratio(a: str, b: str) -> float:
     return len(intersection) / len(union)
 
 
+def _names_different_companies(norm_a: str, norm_b: str) -> bool:
+    """Both headlines name known companies and share none ("OpenAI admits..." vs "Anthropic says...").
+    Shared template wording ("AI agents ... government websites - video") must not merge them: a title
+    link is never re-judged later, so a false merge silently drops a different development."""
+    from app.dedup.features import COMPANY_TOKENS, _COMPANY_FILLER
+
+    names = COMPANY_TOKENS - _COMPANY_FILLER
+    a, b = set(norm_a.split()) & names, set(norm_b.split()) & names
+    return bool(a and b and not (a & b))
+
+
 def is_likely_duplicate_title(title_a: str, title_b: str) -> tuple[bool, float, float]:
     """
     Compare two titles and decide whether they likely describe the
@@ -88,7 +99,7 @@ def is_likely_duplicate_title(title_a: str, title_b: str) -> tuple[bool, float, 
     is_duplicate = (
         seq_score >= SEQUENCE_SIMILARITY_THRESHOLD
         or overlap_score >= TOKEN_OVERLAP_THRESHOLD
-    )
+    ) and not _names_different_companies(norm_a, norm_b)
 
     return is_duplicate, seq_score, overlap_score
 
