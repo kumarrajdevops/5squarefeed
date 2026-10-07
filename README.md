@@ -21,11 +21,11 @@ explainable, nothing that can hallucinate or vary run to run:
 |---|---|---|
 | Ingestion (RSS, Hacker News) | `feedparser`/`requests`, plain HTTP | No |
 | Classification (AI relevance) | Deterministic, fully automated, binary rules gate (`rules-v3`): `ai_candidate` or `not_ai`. Non-news patterns reject; an AI term plus a concrete development is a candidate | No |
-| Deduplication | Title string-similarity + time window, plus full-article-text TF-IDF/cosine similarity within the same batch | No |
+| Deduplication | Title string-similarity + time window, then same-day content dedup (`same-day-v2`): pairs are judged by whether they report the same development (the historical rule ladder), with full-article TF-IDF/cosine only as corroboration | No |
 | Historical dedup | Local sentence embeddings (`fastembed`, `bge-small-en-v1.5`, ONNX CPU, no vector DB) plus deterministic rules decide whether a story reports a development already published; the same company/product alone is never a duplicate | No LLM (small local embedding model) |
 | Fact extraction | Keyword/regex matching (companies, products, events, dates, numeric claims) | No |
-| Verification (soft signal) | Cross-source count + source credibility threshold | No |
-| Ranking | A fixed scoring formula (recency, source credibility, momentum, verification) | No |
+| Verification (soft signal) | Distinct *other* outlets + source credibility threshold; every canonical story is re-assessed on each run | No |
+| Ranking | A fixed scoring formula (recency, source credibility, momentum, verification), applied per development: a duplicate group scores as its best viable article | No |
 | Script generation | String templates from the raw RSS/article text | No |
 | Voice synthesis | Microsoft's `edge-tts` neural voice (`en-US-JennyNeural`) | **Yes -- the one exception** |
 | Visual card | Pillow drawing text on a static template | No |
@@ -60,7 +60,12 @@ whether an article is about AI), never a call to an AI API.
   reflects the actual outlet
 - Deterministic duplicate-story detection, two layers:
   1. Title similarity + time window (fast, in-memory, same-batch only).
-  2. Full-article-text similarity (`app/content/article_extractor.py`
+  2. Same-day content dedup (`same-day-v2`, `app/dedup/same_day.py`): a pair
+     is a duplicate only when it reports the same development, using the
+     same rule ladder as historical dedup; TF-IDF is corroboration only,
+     and a thin or failed fetch never produces a duplicate verdict. The
+     day's draft selections are in the pool and are never demoted.
+  3. Full-article-text similarity (`app/content/article_extractor.py`
      fetches the linked article's real body via `trafilatura`;
      `app/filters/content_similarity.py` scores it with TF-IDF +
      cosine similarity, `scikit-learn` -- classic deterministic
@@ -83,12 +88,17 @@ whether an article is about AI), never a call to an AI API.
   numeric claims -- `app/extraction/fact_extractor.py`) and a
   Verification Engine (`app/verification/engine.py`: verified if
   corroborated by another outlet, or from a source credible enough to
-  be its own primary source) between dedup and ranking. **Soft signal
+  be its own primary source; only distinct *other* outlets count, and
+  every canonical story is re-assessed on each run so statuses never go
+  stale after a dedup change) between dedup and ranking. **Soft signal
   only** -- nothing is excluded from ranking; verification status is
   shown in the dashboard and gives ranking a small score nudge (same
   "surface prominently, human decides" philosophy as Automated QA).
 - Multi-factor ranking engine (recency, source credibility, AI
-  relevance, cross-source momentum, verification) + Top-25/5-backup
+  relevance, cross-source momentum, verification) scored per
+  *development* (a duplicate group scores as its best viable article;
+  momentum counts independent outlets; ties go to the lowest story id)
+  + Top-25/5-backup
   selection, persisted per run as an "Episode". A story that's already
   been a **primary** (narrated) selection in any earlier episode is
   never selected again, in any future episode -- an unused backup
@@ -283,10 +293,17 @@ selection, use the explicit reprocess endpoint instead of calling
 curl -X POST http://localhost:8000/api/v1/episodes/{episode_id}/reprocess
 ```
 
-Reprocess replaces that episode's story selection in place (never
-creates a second episode) and resets its `video_status`/`qa_status`
+Reprocess updates that episode in place (never creates a second
+episode; see below for how the selection is topped up) and resets its `video_status`/`qa_status`
 back to `pending`. It's blocked the same way for approved/published
 episodes -- there is no override.
+
+Re-running selection for an existing **draft** (reprocess, or a repeat of
+the daily processing task) never changes its rows: it only fills empty slots. Removing a
+story by hand (an `EpisodeStory` edit or a dashboard swap) therefore does not
+make it ineligible -- an empty slot could be refilled with it by a later
+reprocess. Stored ranking scores depend on the run's timestamp, so verify
+them by recomputing at that timestamp, not at the current time.
 
 ## Producing content (canonical enhanced Pillow/storyboard renderer)
 
