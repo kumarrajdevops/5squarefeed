@@ -794,6 +794,10 @@ function renderStudioLayout(ep, storyboardReport) {
       : `${env.toUpperCase()} YouTube credentials are not set in .env yet`;
     return `<button class="btn btn-publish youtube-env-${env}" id="btn-publish-${env}" data-env="${env}" type="button" title="${title}" ${(producing || blocked) ? "disabled" : ""}>${label}</button>`;
   }).join("");
+  const prodLive = ((pubs.prod || {}).history || []).some((h) => h.status === "published" && h.youtube_url);
+  const linkedinButtonHtml = `<button class="btn btn-linkedin" id="btn-linkedin" type="button" title="${prodLive
+    ? "Open a LinkedIn post with today's date and time, this episode's PROD YouTube link and the updated image"
+    : "Publish this episode to PROD on YouTube first"}" ${prodLive ? "" : "disabled"}>Post on LinkedIn</button>`;
   const publishLinksHtml = PUBLISH_ENVS.map((env) => {
     const pub = pubs[env];
     if (!pub || !pub.history) return "";
@@ -822,6 +826,7 @@ function renderStudioLayout(ep, storyboardReport) {
           <span class="pill ${ep.publish_status}">${ep.publish_status.replace("_", " ")}</span>
         </div>
         ${publishLinksHtml}
+        <p class="meta" id="linkedin-status" hidden></p>
       </div>
       <div class="studio-actions">
         <button class="btn" id="btn-storyboard" type="button" ${producing || sbRunning ? "disabled" : ""}>${sbRunning ? "Storyboard… 0:00" : "Storyboard"}</button>
@@ -830,6 +835,7 @@ function renderStudioLayout(ep, storyboardReport) {
         <button class="btn btn-pass" id="btn-approve" type="button">Approve</button>
         <button class="btn btn-fail" id="btn-reject" type="button">Reject</button>
         ${publishButtonsHtml}
+        ${linkedinButtonHtml}
       </div>
     </div>
 
@@ -1389,6 +1395,41 @@ function wireHeaderButtons(ep) {
         alert("Failed to queue publish: " + err.message);
       }
     });
+  });
+
+  document.getElementById("btn-linkedin").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-linkedin");
+    const status = document.getElementById("linkedin-status");
+    const label = btn.textContent;
+    // Opened inside the click so the browser does not block it; pointed at LinkedIn once the post is built.
+    const popup = window.open("about:blank", "_blank");
+    btn.disabled = true;
+    btn.textContent = "Preparing…";
+    try {
+      const post = await apiGet(`/episodes/${ep.episode_id}/linkedin`);
+      const blob = await (await fetch(post.image_url)).blob();
+      let copied = false;
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        copied = true;
+      } catch (e) {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `5squarefeed-live-${post.date.replace(/\//g, "-")}.png`;
+        a.click();
+      }
+      if (popup) popup.location = post.compose_url; else window.open(post.compose_url, "_blank");
+      status.hidden = false;
+      status.textContent = `LinkedIn post opened for ${post.date} ${post.time} IST with ${post.youtube_url}. ` +
+        (copied ? "The image is on your clipboard: click in the post box and press Ctrl+V."
+                : "The image was downloaded: attach it in the post box.");
+    } catch (err) {
+      if (popup) popup.close();
+      alert("LinkedIn post failed: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
   });
 
   document.getElementById("btn-approve").addEventListener("click", async () => {

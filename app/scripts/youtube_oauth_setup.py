@@ -27,7 +27,26 @@
 
 from app.config import settings
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# youtube.readonly is only used here, to print which channel the token belongs to.
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+]
+
+
+def authorized_channel(access_token: str) -> tuple[str, str]:
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
+        "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        items = json.load(response).get("items", [])
+    if not items:
+        raise RuntimeError("the signed-in account has no YouTube channel")
+    return items[0]["id"], items[0]["snippet"]["title"]
 
 
 def run_oauth_setup() -> None:
@@ -65,9 +84,14 @@ def run_oauth_setup() -> None:
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
     # Opens your default browser for the Google consent screen and
     # runs a temporary local server to catch the redirect.
-    credentials = flow.run_local_server(port=0)
+    # select_account makes Google always show the account chooser instead of silently reusing
+    # whichever account the browser is signed into (which sent prod uploads to the dev channel).
+    credentials = flow.run_local_server(port=0, prompt="select_account consent")
 
-    print(f"\nSuccess. Add this line to .env:\n")
+    channel_id, channel_title = authorized_channel(credentials.token)
+    print(f"\nThis token publishes to the channel: {channel_title!r} ({channel_id})")
+    print(f"Check that this is the channel you want {env!r} to publish to BEFORE saving it.")
+    print(f"\nIf it is, add this line to .env:\n")
     print(f"{token_var_name}={credentials.refresh_token}\n")
 
 

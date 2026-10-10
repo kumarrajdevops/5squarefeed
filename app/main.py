@@ -1,16 +1,17 @@
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from celery.result import AsyncResult
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from app.config import settings
-from app.dates import episode_key, target_collection_date
+from app.dates import episode_key, episode_made_date, target_collection_date
 from app.db import SessionLocal
 from app.dedup.decision import METHOD_VERSION as DEDUP_METHOD_VERSION
 from app.models import (
@@ -24,7 +25,8 @@ from app.models import (
     StoryContent,
     StoryState,
 )
-from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
+from app.publishing.linkedin import post as linkedin
+from app.publishing.youtube.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
 from app.tasks.content import produce_story_video_task
@@ -905,6 +907,64 @@ def trigger_episode_publish(episode_id: int, environment: str | None = None, rep
 
     task = publish_episode_to_youtube.delay(episode_id, environment, publication_id)
     return {"episode_id": episode_id, "task_id": task.id, "status": "queued"}
+
+
+def _prod_youtube_url(db, episode_id: int) -> str:
+    latest = (
+        db.query(EpisodePublication)
+        .filter(
+            EpisodePublication.episode_id == episode_id,
+            EpisodePublication.environment == "prod",
+            EpisodePublication.status == "published",
+            EpisodePublication.youtube_url.isnot(None),
+        )
+        .order_by(EpisodePublication.sequence.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=409, detail="Publish this episode to PROD on YouTube first.")
+    return latest.youtube_url
+
+
+@app.get("/api/v1/episodes/{episode_id}/linkedin")
+def episode_linkedin_post(episode_id: int, date: str | None = None, time: str | None = None):
+    """The LinkedIn post for an episode: text stamped with the episode's IST made-on date and the
+    fixed 9:00 AM time, the latest PROD YouTube link, the matching image URL, and the LinkedIn
+    compose link. `date` (DD/MM/YYYY) and `time` (H:MM AM) are only for overrides; the image URL
+    carries the same values so the text and image always agree. Nothing is posted."""
+    with SessionLocal() as db:
+        episode = db.get(Episode, episode_id)
+        if episode is None:
+            raise HTTPException(status_code=404, detail="Episode not found.")
+        made_date, made_time = linkedin.post_labels(episode_made_date(episode.created_at))
+        date, time = date or made_date, time or made_time
+        youtube_url = _prod_youtube_url(db, episode_id)
+    try:
+        text_ = linkedin.build_post_text(date, time, youtube_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "episode_id": episode_id, "date": date, "time": time, "youtube_url": youtube_url,
+        "text": text_,
+        "image_url": f"/api/v1/episodes/{episode_id}/linkedin/image?{urlencode({'date': date, 'time': time})}",
+        "compose_url": linkedin.compose_url(text_),
+    }
+
+
+@app.get("/api/v1/episodes/{episode_id}/linkedin/image")
+def episode_linkedin_image(episode_id: int, date: str | None = None, time: str | None = None):
+    if date is None or time is None:
+        with SessionLocal() as db:
+            episode = db.get(Episode, episode_id)
+            if episode is None:
+                raise HTTPException(status_code=404, detail="Episode not found.")
+            made_date, made_time = linkedin.post_labels(episode_made_date(episode.created_at))
+        date, time = date or made_date, time or made_time
+    try:
+        png = linkedin.render_post_image(date, time)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 def _serialize_publications(db, episode: Episode) -> dict:

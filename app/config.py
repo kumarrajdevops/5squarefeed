@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     embedding_cache_dir: str = "/app/media/.model_cache"
 
     # YouTube Data API v3 credentials for the Publishing Worker (see
-    # app/publishing/youtube_publisher.py). None until a real Google
+    # app.publishing.youtube.publisher.py). None until a real Google
     # Cloud OAuth client + one-time consent flow exist -- see
     # app/scripts/youtube_oauth_setup.py and README.md's Publishing
     # section for setup steps. Deliberately optional (not required to

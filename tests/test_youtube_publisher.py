@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from app.publishing.youtube_publisher import (
+from app.publishing.youtube.publisher import (
     MAX_DESCRIPTION_CHARS,
     YouTubeNotConfigured,
     build_video_metadata,
@@ -60,7 +60,7 @@ def test_upload_video_fails_fast_when_not_configured(monkeypatch):
     is the actual, current, expected behavior, not just a defensive
     edge case.
     """
-    from app.publishing import youtube_publisher
+    from app.publishing.youtube import publisher as youtube_publisher
 
     # youtube_client_id/secret/refresh_token are read-only properties
     # derived from youtube_environment (dev/prod) -- monkeypatch the

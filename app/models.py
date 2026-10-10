@@ -293,7 +293,7 @@ class EpisodePublication(Base):
     produced video can go to dev and prod independently, and each environment
     can be published again later (sequence 2, 3, ...), e.g. after a re-Produce.
     Episode.publish_* is the roll-up of these rows
-    (app/publishing/summary.py).
+    (app.publishing.youtube.summary.py).
     """
 
     __tablename__ = "episode_publications"
