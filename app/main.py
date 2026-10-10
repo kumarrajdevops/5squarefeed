@@ -24,7 +24,7 @@ from app.models import (
     StoryContent,
     StoryState,
 )
-from app.publishing.summary import ENVIRONMENTS, refresh_publish_summary
+from app.publishing.youtube.summary import ENVIRONMENTS, refresh_publish_summary
 from app.tasks.classify import run_classify_new_raw_items
 from app.tasks.collection import run_collection
 from app.tasks.content import produce_story_video_task

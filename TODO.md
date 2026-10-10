@@ -1153,7 +1153,7 @@ auto-blocking).
       only, never auto-cascading from Approve -- consistent with every
       other stage in this pipeline (Produce/QA/Approve are all manual
       triggers today).
-- [x] `app/publishing/youtube_publisher.py` (new): `build_video_metadata()`
+- [x] `app.publishing.youtube.publisher.py` (new): `build_video_metadata()`
       is a pure function (title/description/tags from the episode's
       real Top 25 -- headline + source + link per story), same
       "keep the deterministic logic pure and testable" pattern as
@@ -1355,7 +1355,7 @@ auto-blocking).
       title/wordmark (`app/dashboard/index.html`), FastAPI app title
       (`app/main.py`), video intro/outro branding cards + narration
       (`app/tasks/episode_video.py`), YouTube video title/description/
-      tags (`app/publishing/youtube_publisher.py`'s `BRAND_NAME`),
+      tags (`app.publishing.youtube.publisher.py`'s `BRAND_NAME`),
       `README.md`, `CLAUDE.md`'s project-identity section, the
       `episode-verifier` agent, and the corresponding test assertions
       (`tests/test_youtube_publisher.py`). Deliberately did NOT rewrite
@@ -1491,7 +1491,7 @@ auto-blocking).
       `"prod"` the other option). Both credential pairs can be
       configured in `.env` simultaneously; switching modes is a
       one-line env var change, never editing secrets back and forth.
-      `app/publishing/youtube_publisher.py` and
+      `app.publishing.youtube.publisher.py` and
       `app/tasks/publishing.py` needed **zero changes** to their own
       logic -- they still just read `settings.youtube_client_id` etc.,
       unaware credential resolution got smarter underneath them.
@@ -2946,7 +2946,7 @@ whenever it does.
       new table `editorial.episode_publications` (unique episode+environment; migration `e7b1c4d9a203`
       backfills already-published episodes as `dev`); `POST /episodes/{id}/publish?environment=`;
       task `publish_episode_to_youtube(episode_id, environment)`; `Episode.publish_*` is a roll-up
-      (`app/publishing/summary.py`). Dashboard shows Publish to DEV / Publish to PROD (PROD disabled
+      (`app.publishing.youtube.summary.py`). Dashboard shows Publish to DEV / Publish to PROD (PROD disabled
       until `YOUTUBE_PROD_*` are set). Tests: `tests/test_multi_environment_publish.py`.
       To enable prod later: set `YOUTUBE_PROD_*` in `.env` (run `youtube_oauth_setup.py` with
       `YOUTUBE_ENVIRONMENT=prod`), then `docker compose up -d --force-recreate api worker`.

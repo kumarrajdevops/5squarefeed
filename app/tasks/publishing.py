@@ -6,8 +6,8 @@ from app.dates import episode_made_date
 from app.db import SessionLocal
 from app.models import Episode, EpisodePublication, EpisodeStory, NewsItem
 from app.notifications.notifier import EPISODE_PUBLISH_FAILED, notify
-from app.publishing.summary import refresh_publish_summary
-from app.publishing.youtube_publisher import build_video_metadata, upload_video
+from app.publishing.youtube.summary import refresh_publish_summary
+from app.publishing.youtube.publisher import build_video_metadata, upload_video
 from app.worker.celery_app import celery_app
 
 
@@ -15,7 +15,7 @@ from app.worker.celery_app import celery_app
 def publish_episode_to_youtube(episode_id: int, environment: str | None = None, publication_id: int | None = None) -> dict:
     """
     Upload an already-approved, already-produced episode's combined
-    video to YouTube (see app/publishing/youtube_publisher.py).
+    video to YouTube (see app.publishing.youtube.publisher.py).
 
     Does not produce or approve anything itself -- POST
     /episodes/{id}/publish (app/main.py) already validated

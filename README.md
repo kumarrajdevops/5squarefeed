@@ -586,7 +586,7 @@ otherwise). Uploads the real combined episode video via the YouTube
 Data API v3's resumable upload, with a title/description/tags built
 deterministically from the episode's actual Top 25 (headline + source
 + link per story, same pattern as everything else in this pipeline --
-see `build_video_metadata()` in `app/publishing/youtube_publisher.py`).
+see `build_video_metadata()` in `app.publishing.youtube.publisher.py`).
 New uploads default to **private** visibility -- there's no visibility
 control in the dashboard yet, so a human always makes a video
 public/unlisted deliberately via YouTube Studio afterward, never
