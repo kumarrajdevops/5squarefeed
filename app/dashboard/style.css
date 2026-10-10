@@ -201,6 +201,8 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
 .btn-fail { background: var(--fail); color: #fff; border-color: var(--fail); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-warn { background: var(--skip-bg); color: var(--skip); border-color: var(--skip); }
+.btn-linkedin { background: #0a66c2; color: #fff; border-color: #0a66c2; }
+.btn-linkedin:hover { background: #004182; }
 .btn-small { padding: 6px 12px; font-size: 12.5px; }
 
 /* Collect New Stories (dev/local only) */
