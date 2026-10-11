@@ -87,6 +87,11 @@ class NewsItem(Base):
     collection_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
     raw_summary: Mapped[str | None] = mapped_column(Text)
+    # Collected Stories page's Summary pop-up editor only (PATCH /api/v1/raw/news-items/{id}) --
+    # bumped once per explicit Save, never by collection itself. Drives the Summary button's
+    # white-to-black gradient (0 = never edited, 4+ = fully black) so an editor can see edit
+    # history at a glance without opening the pop-up.
+    raw_summary_edit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Full extracted article body (see app/content/article_extractor.py)
     # -- NULL until a fetch is attempted (content_fetch_status lives on
@@ -217,6 +222,15 @@ class StoryState(Base):
     )
     verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     taxonomy_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Collected Stories page's "Not Required" button only (POST /api/v1/stories/{id}/exclude) --
+    # an editor's manual "this doesn't belong in Primary" call. list_news_items drops an excluded
+    # story from Primary/needs_source entirely and sorts it last in Secondary; the endpoint also
+    # deletes any real EpisodeStory row for it so the actual episode selection matches what the
+    # page shows (not just a display-layer hide). Re-eligible on a future reprocess/Rank & Select,
+    # same "removed story can come back" dynamic already documented in CLAUDE.md/TODO.md for any
+    # manual EpisodeStory edit -- not a new risk, the same one.
+    excluded_by_editor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class Episode(Base):
