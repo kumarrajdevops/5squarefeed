@@ -150,6 +150,11 @@ def _score_and_select_top_stories(
             # Stories whose source cannot support a briefing (app/content/briefing)
             # are never selected; NULL (not assessed) stays eligible.
             or_(StoryState.source_sufficiency.is_(None), StoryState.source_sufficiency != "insufficient"),
+            # Collected Stories page's "Not Required" button (POST /api/v1/stories/{id}/exclude)
+            # -- an editor's manual call, same hard-exclusion treatment as source_sufficiency
+            # above. Applies here (not just in main.py's display query) so a future Rank & Select/
+            # reprocess run doesn't silently re-select a story an editor explicitly removed.
+            StoryState.excluded_by_editor.is_(False),
         )
     )
 
