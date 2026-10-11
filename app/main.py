@@ -1,5 +1,7 @@
 import json
+import re
 from datetime import date, datetime, timezone
+from html import unescape
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -8,10 +10,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.config import settings
 from app.dates import episode_key, episode_made_date, target_collection_date
+from app.text_utils import clean_text
 from app.db import SessionLocal
 from app.dedup.decision import METHOD_VERSION as DEDUP_METHOD_VERSION
 from app.models import (
@@ -44,6 +47,12 @@ from app.tasks.ranking import (
     reprocess_episode,
     run_ranking_selection,
 )
+# _score_and_select_top_stories is the one scoring/eligibility pass run_ranking_selection and
+# reprocess_episode both already share -- reused read-only here too, so the Collected Stories
+# page's Primary box can show a live "who'd make the cut right now" preview before Rank & Select
+# has actually run (Classify/Dedup/etc. change what's eligible; this just re-derives the same
+# answer those stages would, nothing is persisted until Rank & Select is actually clicked).
+from app.tasks.ranking import PRIMARY_SLOTS, _score_and_select_top_stories
 from app.tasks.scheduled import run_daily_processing
 from app.tasks.verification import run_verification
 from app.worker.celery_app import celery_app
@@ -132,6 +141,14 @@ class StoryContentUpdate(BaseModel):
     summary: str | None = None
     script_text: str | None = None
     support_text: str | None = None  # "" clears the override (back to automatic)
+
+
+class NewsItemUpdate(BaseModel):
+    raw_summary: str
+
+
+class StoryExcludeUpdate(BaseModel):
+    excluded: bool = True
 
 
 class ReorderRequest(BaseModel):
@@ -286,6 +303,477 @@ def list_collection_runs(collection_date: str | None = None, limit: int = 20):
         ]
 
 
+_TAG_BREAK_RE = re.compile(r"</(?:p|div|li|h[1-6]|tr|blockquote)>|<br\s*/?>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\r\f\v]+")
+_BLANK_LINES_RE = re.compile(r"\n\s*\n+")
+
+
+def _display_summary(raw_summary: str | None) -> str | None:
+    """
+    Plain-text version of raw_summary for the Collected Stories page's Summary column/editor --
+    many RSS feeds (WordPress ones especially) ship full unstripped HTML in their <description>
+    (<p>/<img> tags, an "appeared first on <a href=...>" boilerplate link), which read as garbage
+    in a plain textarea. Same building blocks app/content/briefing/hygiene.py's _to_plain uses for
+    the real script-generation pipeline (that path already cleans this before scripting -- this
+    page's display/edit path never did). raw.news_items itself is NEVER rewritten here -- this
+    only reshapes a copy for display; PATCHing this field back only overwrites the stored value
+    if an editor explicitly saves an edit.
+    """
+    if not raw_summary:
+        return raw_summary
+    text_ = _TAG_BREAK_RE.sub("\n", raw_summary)
+    text_ = _TAG_RE.sub(" ", text_)
+    text_ = clean_text(unescape(text_)) or ""
+    text_ = _WS_RE.sub(" ", text_)
+    return _BLANK_LINES_RE.sub("\n", text_).strip()
+
+
+def _sufficiency_reason(state: StoryState | None) -> str | None:
+    # sufficiency_detail is content_dedup.assess_source_sufficiency's JSON blob (scoring
+    # internals); its own "reason" key is already the human-readable summary -- same pattern as
+    # dedup_reason/verification_reason, just one JSON-decode away instead of a plain column.
+    if state is None or not state.sufficiency_detail:
+        return None
+    try:
+        return json.loads(state.sufficiency_detail).get("reason")
+    except (ValueError, AttributeError):
+        return None
+
+
+def _news_item_dict(item: NewsItem, state: StoryState | None) -> dict:
+    return {
+        "id": item.id,
+        "source_name": item.source_name,
+        "source_type": item.source_type,
+        "title": item.title,
+        "canonical_url": item.canonical_url,
+        "author": item.author,
+        "raw_summary": _display_summary(item.raw_summary),
+        "raw_summary_edit_count": item.raw_summary_edit_count,
+        "published_at": item.published_at,
+        "collected_at": item.collected_at,
+        "status": item.status,
+        "ai_relevance": state.ai_relevance if state else None,
+        "classifier_disposition": state.classifier_disposition if state else None,
+        "canonical_story_id": state.canonical_story_id if state else None,
+        "dedup_reason": state.dedup_reason if state else None,
+        "verification_status": state.verification_status if state else None,
+        "verification_reason": state.verification_reason if state else None,
+        "source_sufficiency": state.source_sufficiency if state else None,
+        "sufficiency_reason": _sufficiency_reason(state),
+        "excluded_by_editor": state.excluded_by_editor if state else False,
+    }
+
+
+@app.get("/api/v1/raw/news-items")
+def list_news_items(collection_date: str | None = None, limit: int = 500):
+    """
+    The raw items collected for one day, split into Primary (this date's
+    draft/approved episode's episode_stories, ranks 1-30, ordered) and
+    Secondary (everything else in the day's pool) -- powers the
+    dashboard's Collected Stories page. Primary is empty until Rank &
+    Select has created the episode. Left-joins editorial.stories so
+    classification shows up once it exists, without requiring it
+    (collection itself writes zero rows there -- see StoryState's
+    docstring). Defaults to today's target_collection_date() when
+    collection_date is omitted.
+    """
+    limit = max(1, min(limit, 1000))
+
+    if collection_date is not None:
+        try:
+            parsed_date = date.fromisoformat(collection_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid collection_date {collection_date!r}; expected YYYY-MM-DD.",
+            )
+    else:
+        parsed_date = target_collection_date()
+
+    with SessionLocal() as db:
+        episode = db.query(Episode).filter(Episode.episode_date == parsed_date).first()
+        # This page is for pre-approval triage -- once an episode is approved/published it's
+        # locked (same REPROCESSABLE_STATUSES reprocess_episode already enforces), so its
+        # selection is never shown or editable here. The pool looks exactly like a fresh,
+        # untouched day rather than showing a locked-in primary. No episode at all is NOT
+        # locked -- that's the normal pre-ranking state, handled below.
+        locked = episode is not None and episode.status not in REPROCESSABLE_STATUSES
+
+        primary = []
+        primary_ids: set[int] = set()
+        primary_is_preview = False
+
+        persisted_rows = []
+        if episode is not None and not locked:
+            persisted_rows = (
+                db.query(EpisodeStory, NewsItem, StoryState)
+                .join(NewsItem, NewsItem.id == EpisodeStory.story_id)
+                .outerjoin(StoryState, StoryState.id == EpisodeStory.story_id)
+                .filter(EpisodeStory.episode_id == episode.id)
+                .order_by(EpisodeStory.rank_position)
+                .all()
+            )
+
+        if persisted_rows:
+            for episode_story, item, state in persisted_rows:
+                primary_ids.add(item.id)
+                primary.append({
+                    **_news_item_dict(item, state),
+                    "rank_position": episode_story.rank_position,
+                    "selection_status": episode_story.selection_status,
+                    "rank_score": episode_story.rank_score,
+                    "rank_reason": episode_story.rank_reason,
+                })
+
+            # source_sufficiency == "insufficient" is a structural exclusion -- these canonicals
+            # never got (and never would get) an EpisodeStory row, since _score_and_select_top_
+            # stories drops them before scoring (not enough real article text to generate a
+            # script at all). That's categorically different from "scored but didn't make the
+            # cut" (real backups, which stay promotable), so they get their own status rather
+            # than appearing as a misleading "backup" -- still shown in Primary (not lost in
+            # Secondary) since they're genuine ai_candidates worth an editor's attention. "thin"
+            # is deliberately NOT included here: it doesn't exclude a story from real scoring (see
+            # app/content/briefing/sufficiency.py), so an unselected thin story just lost on score
+            # like any other candidate -- nothing structurally special about it.
+            needs_source_rows = (
+                db.query(NewsItem, StoryState)
+                .join(StoryState, StoryState.id == NewsItem.id)
+                .filter(
+                    NewsItem.collection_date == parsed_date,
+                    StoryState.ai_relevance == "ai_candidate",
+                    StoryState.canonical_story_id.is_(None),
+                    StoryState.source_sufficiency == "insufficient",
+                    StoryState.excluded_by_editor.is_(False),
+                    NewsItem.id.notin_(primary_ids),
+                )
+                .order_by(NewsItem.id)
+                .all()
+            )
+            for item, state in needs_source_rows:
+                primary_ids.add(item.id)
+                primary.append({
+                    **_news_item_dict(item, state),
+                    "rank_position": None,
+                    "selection_status": "needs_source",
+                    "rank_score": None,
+                    "rank_reason": _sufficiency_reason(state),
+                })
+        elif not locked:
+            # Rank & Select hasn't actually run yet (no episode, or one exists with nothing
+            # selected) -- show a live "who'd make the cut right now" preview. ai_candidate is
+            # the one and only membership rule for Primary here: every ai_candidate (and its
+            # duplicates) belongs in Primary, full stop -- sufficiency, historical-duplicate and
+            # already-used-elsewhere are real ranking rules, but they only decide primary/backup/
+            # excluded STATUS, not whether something is still an ai_candidate worth seeing here,
+            # and not display order (see the chronological sort below `_add_canonical`). So:
+            # everyone `_score_and_select_top_stories` would accept gets real-score-derived status,
+            # every OTHER ai_candidate canonical it excluded (insufficient source, historical
+            # repeat, already used) is still included too, status "primary" so it isn't mistaken
+            # for a real exclusion. Nothing here is persisted.
+            scored, _, _, _ = _score_and_select_top_stories(db, datetime.now(timezone.utc), parsed_date)
+            scored_ids = {item.id for item, _, _, _ in scored}
+
+            extra_canonicals = (
+                db.query(NewsItem, StoryState)
+                .join(StoryState, StoryState.id == NewsItem.id)
+                .filter(
+                    NewsItem.collection_date == parsed_date,
+                    StoryState.ai_relevance == "ai_candidate",
+                    StoryState.canonical_story_id.is_(None),
+                    StoryState.excluded_by_editor.is_(False),
+                    NewsItem.id.notin_(scored_ids),
+                )
+                .order_by(NewsItem.collected_at.asc())
+                .all()
+            )
+
+            # Duplicates (ai_candidate stories pointing at one of these canonicals via
+            # canonical_story_id) are excluded from both lists above -- they only ever appear as
+            # someone else's canonical_story_id. Shown here too, grouped right under their
+            # canonical, so a duplicate ai_candidate is never silently invisible on this page.
+            canonical_ids = list(scored_ids) + [item.id for item, _ in extra_canonicals]
+            duplicates_by_canonical: dict[int, list] = {}
+            if canonical_ids:
+                # Same published_at-ascending rule as the canonicals themselves (see the sort
+                # below `_add_canonical`) -- sorted in Python, not SQL, so a missing published_at
+                # sorts last the same way in both places rather than depending on the DB's NULLS
+                # ordering default.
+                dup_rows = (
+                    db.query(NewsItem, StoryState)
+                    .join(StoryState, StoryState.id == NewsItem.id)
+                    .filter(
+                        StoryState.canonical_story_id.in_(canonical_ids),
+                        StoryState.excluded_by_editor.is_(False),
+                    )
+                    .all()
+                )
+                dup_rows.sort(key=lambda row: (row[0].published_at is None, row[0].published_at))
+                for dup_item, dup_state in dup_rows:
+                    duplicates_by_canonical.setdefault(dup_state.canonical_story_id, []).append((dup_item, dup_state))
+
+            canonical_position = 0
+
+            def _add_canonical(item, state, score, reason, status):
+                nonlocal canonical_position
+                canonical_position += 1
+                position = canonical_position
+                primary_ids.add(item.id)
+                primary.append({
+                    **_news_item_dict(item, state),
+                    "rank_position": position,
+                    "selection_status": status,
+                    "rank_score": score,
+                    "rank_reason": reason,
+                })
+                for dup_item, dup_state in duplicates_by_canonical.get(item.id, []):
+                    primary_ids.add(dup_item.id)
+                    primary.append({
+                        **_news_item_dict(dup_item, dup_state),
+                        "rank_position": position,
+                        "selection_status": "duplicate",
+                        "rank_score": score,
+                        "rank_reason": dup_state.dedup_reason,
+                    })
+
+            # Real score (and PRIMARY_SLOTS cutoff) still decides primary/backup/excluded status --
+            # that's a ranking question. Display SEQUENCE on this page is a separate, purely
+            # chronological concern until Rank & Select actually runs: every pre-selection stage
+            # (Classify, Dedup, Content-Dedup, Historical-Dedup, Verify) should show the same
+            # order, so the sequence doesn't jump around run to run -- verified stories first
+            # (Verify's cross-source/primary-source evidence), earliest-published-first within
+            # each group. A missing published_at sorts last (unknown time, not "earliest").
+            candidates = [
+                (item, state, score, reason, "primary" if position <= PRIMARY_SLOTS else "backup")
+                for position, (item, state, score, reason) in enumerate(scored, start=1)
+            ]
+            for item, state in extra_canonicals:
+                if state.source_sufficiency == "insufficient":
+                    # Same "needs_source" status as the persisted branch below -- structurally
+                    # excluded (no real article text), not a normal ranking loss.
+                    candidates.append((item, state, None, _sufficiency_reason(state), "needs_source"))
+                else:
+                    candidates.append(
+                        (item, state, None, "excluded from real ranking: already used or historical repeat", "primary")
+                    )
+
+            candidates.sort(
+                key=lambda c: (c[1].verification_status != "verified", c[0].published_at is None, c[0].published_at)
+            )
+
+            for item, state, score, reason, status in candidates:
+                _add_canonical(item, state, score, reason, status)
+            primary_is_preview = True
+
+        secondary_rows = (
+            db.query(NewsItem, StoryState)
+            .outerjoin(StoryState, StoryState.id == NewsItem.id)
+            .filter(NewsItem.collection_date == parsed_date)
+            .order_by(NewsItem.collected_at.desc())
+            .limit(limit)
+            .all()
+        )
+        secondary = [
+            _news_item_dict(item, state) for item, state in secondary_rows if item.id not in primary_ids
+        ]
+        # "insufficient" ai_candidates now live in Primary as "needs_source" (see above), not here.
+        # "thin" stays in Secondary -- unlike "insufficient" it doesn't structurally exclude a
+        # story from real scoring (app/content/briefing/sufficiency.py), so an unselected thin
+        # story is just a normal ranking loss, not a special case -- still worth sorting to the
+        # top so it isn't lost among "not_ai"/unclassified rows in the same pool, just not worth
+        # a Primary slot of its own. An editor-excluded ("Not Required") story sorts dead last,
+        # after even a plain not_ai row -- it was deliberately removed, the opposite of needing
+        # attention. Stable sort: collected_at desc preserved within each of these three groups.
+        secondary.sort(
+            key=lambda d: (
+                2 if d["excluded_by_editor"]
+                else 0 if d["ai_relevance"] == "ai_candidate" and d["source_sufficiency"] == "thin"
+                else 1
+            )
+        )
+
+        # Historical-Dedup verdicts live in editorial.historical_story_relations, separate from
+        # StoryState.canonical_story_id (same-day dedup) -- reusing _historical_relations (already
+        # used by the episode-story-detail endpoint below) rather than duplicating that query/
+        # editor_override-coalescing logic here.
+        hist = _historical_relations(db, [d["id"] for d in primary + secondary])
+        for d in primary + secondary:
+            rel = hist.get(d["id"])
+            is_dup = rel is not None and rel["decision"] == "duplicate"
+            d["historical_duplicate_of"] = rel["matched_story_id"] if is_dup else None
+            d["historical_reason"] = rel["reason"] if is_dup else None
+
+        return {
+            "collection_date": parsed_date,
+            "episode_id": episode.id if episode else None,
+            "episode_status": episode.status if episode else None,
+            "episode_locked": locked,
+            "primary": primary,
+            "primary_count": len(primary),
+            "primary_is_preview": primary_is_preview,
+            "secondary": secondary,
+            "secondary_count": len(secondary),
+        }
+
+
+@app.patch("/api/v1/raw/news-items/{item_id}")
+def update_news_item_summary(item_id: int, body: NewsItemUpdate):
+    """
+    Editorial override of the raw, as-collected summary/teaser text (e.g. fixing a source's
+    truncated RSS blurb -- see CLAUDE.md's historical "dangling [...] fragment" bug) --
+    Collected Stories page only, DEV-only (same guard as the rest of this section).
+
+    raw.news_items is otherwise collection-owned (re-collecting the same item overwrites it, see
+    NewsItem's docstring); editing it here is a deliberate, explicit exception. Downstream stages
+    that already ran against the OLD text (Classify's relevance call, Content-Dedup's sufficiency
+    assessment) are NOT re-run automatically -- re-trigger the relevant stage button to pick up
+    the edit, same as any other raw-data change.
+    """
+    _reject_if_not_dev()
+
+    with SessionLocal() as db:
+        item = db.query(NewsItem).filter(NewsItem.id == item_id).first()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"No news item with id {item_id}.")
+
+        item.raw_summary = body.raw_summary.strip() or None
+        # Every explicit Save counts, even re-saving identical text -- this drives the Summary
+        # button's white-to-black gradient (an edit-frequency signal), not a dirty-check.
+        item.raw_summary_edit_count += 1
+        db.commit()
+        return {
+            "id": item.id,
+            "raw_summary": item.raw_summary,
+            "raw_summary_edit_count": item.raw_summary_edit_count,
+        }
+
+
+@app.post("/api/v1/stories/{story_id}/exclude")
+def update_story_excluded(story_id: int, body: StoryExcludeUpdate):
+    """
+    Collected Stories page's "Not Required" button -- an editor's manual "this doesn't belong in
+    Primary" call. DEV-only (same guard as the rest of this section).
+
+    Sets StoryState.excluded_by_editor; list_news_items drops an excluded story from Primary/
+    needs_source entirely and sorts it last in Secondary. When excluding (not un-excluding) a
+    story that's a real EpisodeStory row in this date's episode, that row is deleted too -- a
+    display-only hide would leave the actual episode selection (and anything Produce renders)
+    including a story the page claims was removed. Same "removed story is eligible again on a
+    future reprocess/Rank & Select" dynamic CLAUDE.md already documents for any manual
+    EpisodeStory edit -- un-excluding doesn't resurrect the deleted row by itself.
+    """
+    _reject_if_not_dev()
+
+    with SessionLocal() as db:
+        state = db.query(StoryState).filter(StoryState.id == story_id).first()
+        if state is None:
+            raise HTTPException(status_code=404, detail=f"No editorial state for story {story_id}.")
+
+        state.excluded_by_editor = body.excluded
+        episode_stories_deleted = 0
+
+        if body.excluded:
+            item = db.query(NewsItem).filter(NewsItem.id == story_id).first()
+            episode = (
+                db.query(Episode).filter(Episode.episode_date == item.collection_date).first()
+                if item
+                else None
+            )
+            if episode is not None:
+                episode_stories_deleted = (
+                    db.query(EpisodeStory)
+                    .filter(EpisodeStory.episode_id == episode.id, EpisodeStory.story_id == story_id)
+                    .delete(synchronize_session=False)
+                )
+
+        db.commit()
+        return {
+            "id": story_id,
+            "excluded_by_editor": state.excluded_by_editor,
+            "episode_stories_deleted": episode_stories_deleted,
+        }
+
+
+@app.post("/api/v1/stories/{story_id}/force-rank")
+def force_story_into_rank(story_id: int):
+    """
+    Collected Stories page's "Move to Rank" button -- an editor's manual "this belongs on the
+    board regardless" override, shown on every row in BOTH Primary and Secondary (unlike "Not
+    Required", which is Primary-only). Bypasses every normal eligibility rule this page otherwise
+    respects -- classification, source sufficiency, dedup/historical-duplicate status, even a
+    prior "Not Required" -- and inserts a real EpisodeStory row (selection_status "primary") for
+    this story in this date's episode, so it's genuinely selected and will be picked up by
+    Produce/the content pipeline, not just displayed differently on this page.
+
+    Creates the date's Episode row if none exists yet (status "draft") -- works at any pipeline
+    stage, not only after Rank & Select has already run. Clears excluded_by_editor (force-include
+    contradicts a prior exclude). Idempotent: a story already selected in this episode is left
+    alone. Deliberately does NOT check episode.status/REPROCESSABLE_STATUSES -- same "operates
+    regardless of lock status" precedent as this section's Reset-to-collected button; forcing a
+    story into an already-approved/published episode's selection won't itself change anything
+    already rendered, but a future re-Produce would pick it up.
+    """
+    _reject_if_not_dev()
+
+    with SessionLocal() as db:
+        item = db.query(NewsItem).filter(NewsItem.id == story_id).first()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"No news item with id {story_id}.")
+
+        state = db.query(StoryState).filter(StoryState.id == story_id).first()
+        if state is None:
+            state = StoryState(id=story_id)
+            db.add(state)
+        state.excluded_by_editor = False
+
+        episode = db.query(Episode).filter(Episode.episode_date == item.collection_date).first()
+        created_episode = False
+        if episode is None:
+            episode = Episode(episode_date=item.collection_date)
+            db.add(episode)
+            db.flush()
+            created_episode = True
+
+        existing = (
+            db.query(EpisodeStory)
+            .filter(EpisodeStory.episode_id == episode.id, EpisodeStory.story_id == story_id)
+            .first()
+        )
+        if existing is not None:
+            db.commit()
+            return {
+                "id": story_id,
+                "episode_id": episode.id,
+                "created_episode": created_episode,
+                "already_in_board": True,
+                "selection_status": existing.selection_status,
+            }
+
+        max_position = (
+            db.query(func.max(EpisodeStory.rank_position))
+            .filter(EpisodeStory.episode_id == episode.id)
+            .scalar()
+        ) or 0
+
+        db.add(EpisodeStory(
+            episode_id=episode.id,
+            story_id=story_id,
+            rank_position=max_position + 1,
+            selection_status="primary",
+            rank_score=1.0,
+            rank_reason="Manually forced onto the board via 'Move to Rank' (editor override, bypasses normal eligibility).",
+        ))
+        db.commit()
+        return {
+            "id": story_id,
+            "episode_id": episode.id,
+            "created_episode": created_episode,
+            "already_in_board": False,
+            "selection_status": "primary",
+        }
+
+
 # ---------------------------------------------------------
 # Per-stage processing triggers -- DEV-only. Production never calls
 # these individually; the scheduled 4 AM IST pass always runs the full
@@ -394,6 +882,71 @@ def trigger_rank(episode_date: str | None = None):
 
     task = run_ranking_selection.delay(episode_date)
     return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/processing/reset-to-collected")
+def reset_to_collected(target_date: str | None = None):
+    """
+    TEMPORARY dev/testing convenience: wipe everything Classify-through-Rank&Select produced for
+    target_date, back to "just collected" -- so the whole pipeline can be re-run from Classify
+    without re-collecting real news. Synchronous, not a Celery task (plain deletes, no reason to
+    queue it). raw.news_items is never touched -- only derived editorial.* state for this date's
+    stories: any Episode (and its episode_stories), story_content, historical_story_relations, and
+    the editorial.stories rows themselves. DEV-only, same guard as the rest of this section.
+    Remove this endpoint (and its dashboard button) once the Collected Stories feature work is done.
+    """
+    _reject_if_not_dev()
+    _validate_date_param(target_date, "target_date")
+    parsed_date = date.fromisoformat(target_date) if target_date else target_collection_date()
+
+    with SessionLocal() as db:
+        story_ids = [
+            row[0] for row in
+            db.query(NewsItem.id).filter(NewsItem.collection_date == parsed_date).all()
+        ]
+
+        # EpisodeStory (episode_stories_episode_id_fkey) must be deleted before Episode, not after
+        # -- Postgres enforces the FK immediately (NOT DEFERRABLE), so deleting the parent first
+        # raised ForeignKeyViolation and aborted the whole transaction uncommitted whenever the
+        # episode actually had any EpisodeStory rows (i.e. Rank & Select had run) -- the exact
+        # "reset was not happening" case, confirmed live: `update or delete on table "episodes"
+        # violates foreign key constraint "episode_stories_episode_id_fkey"`.
+        episode_stories_deleted = 0
+        story_content_deleted = 0
+        historical_relations_deleted = 0
+        stories_deleted = 0
+        if story_ids:
+            episode_stories_deleted = (
+                db.query(EpisodeStory).filter(EpisodeStory.story_id.in_(story_ids)).delete(synchronize_session=False)
+            )
+            story_content_deleted = (
+                db.query(StoryContent).filter(StoryContent.story_id.in_(story_ids)).delete(synchronize_session=False)
+            )
+            historical_relations_deleted = (
+                db.query(HistoricalStoryRelation)
+                .filter(
+                    (HistoricalStoryRelation.story_id.in_(story_ids))
+                    | (HistoricalStoryRelation.matched_story_id.in_(story_ids))
+                )
+                .delete(synchronize_session=False)
+            )
+            stories_deleted = (
+                db.query(StoryState).filter(StoryState.id.in_(story_ids)).delete(synchronize_session=False)
+            )
+
+        episodes_deleted = db.query(Episode).filter(Episode.episode_date == parsed_date).delete()
+
+        db.commit()
+
+    return {
+        "target_date": parsed_date,
+        "episodes_deleted": episodes_deleted,
+        "episode_stories_deleted": episode_stories_deleted,
+        "story_content_deleted": story_content_deleted,
+        "historical_relations_deleted": historical_relations_deleted,
+        "stories_deleted": stories_deleted,
+        "news_items_kept": len(story_ids),
+    }
 
 
 @app.get("/api/v1/tasks/{task_id}/result")

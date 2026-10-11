@@ -1,0 +1,82 @@
+name: 5squarefeed-test
+# Fully isolated environment for testing the Collected Stories primary/secondary feature against
+# real collected news, without touching the main dev stack's DB (which has real, some already-
+# approved, episode data -- see docker-compose.yml). Separate project name, containers, ports and
+# volume; same codebase (bind-mounted), same .env (no real secrets differ -- collection itself
+# needs no API keys, see app/sources/registry.py), so real RSS/HN collection works exactly the
+# same here. Nothing in here is ever started by the main `docker compose` commands -- always pass
+# -f docker-compose.test.yml explicitly.
+#
+# Bring up:   docker compose -f docker-compose.test.yml up -d
+# Migrate:    docker compose -f docker-compose.test.yml exec api alembic upgrade head
+# Dashboard:  http://localhost:8001/dashboard/
+# Tear down:  docker compose -f docker-compose.test.yml down -v   (the -v also drops the volume --
+#             this environment is disposable by design, never meant to persist real decisions)
+
+services:
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ai_news
+      POSTGRES_USER: ai_news
+      POSTGRES_PASSWORD: ai_news_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_news -d ai_news"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres-test
+      REDIS_URL: redis://redis-test:6379/0
+    ports:
+      - "8001:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+
+  worker-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.worker.celery_app worker --loglevel=INFO
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres-test
+      REDIS_URL: redis://redis-test:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+
+volumes:
+  postgres_test_data:
