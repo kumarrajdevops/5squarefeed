@@ -145,6 +145,70 @@ table.episode-list tr:last-child td { border-bottom: none; }
 table.episode-list tr.row-link { cursor: pointer; }
 table.episode-list tr.row-link:hover { background: var(--surface-2); }
 
+/* Collected Stories: Primary row identity, at a glance, without a dedicated column. */
+table.episode-list tr.row-backup td:first-child { border-left: 3px solid var(--skip); }
+table.episode-list tr.row-duplicate { background: var(--surface-2); }
+table.episode-list tr.row-duplicate td:first-child { border-left: 3px solid var(--border); }
+/* Primary: insufficient-source ai_candidates (see list_news_items) -- distinct from row-backup's
+   amber accent since these are NOT promotable/eligible, just surfaced for editorial attention. */
+table.episode-list tr.row-needs_source td:first-child { border-left: 3px solid var(--fail); }
+/* Secondary: ai_candidate stories sorted to the top for an insufficient/thin source (see
+   list_news_items) -- real candidates, just not currently producible, not "backup". */
+table.episode-list tr.row-flagged td:first-child { border-left: 3px solid var(--skip); }
+
+/* Collected Stories: raw_summary preview + edit button (PATCH /api/v1/raw/news-items/{id} via
+   the shared #summary-modal popup, not inline, to keep each row compact). */
+.cell-summary { min-width: 180px; max-width: 280px; }
+.summary-preview {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.cell-duplicate-title { color: var(--text-muted); }
+
+/* Shared modal popup (Summary editor today; generic enough to reuse). Appended to <body>, not
+   #app, so a page re-render never touches it -- see ensureSummaryModal in app.js. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 1000;
+}
+/* Without this, [hidden]'s default UA display:none loses to the class rule above (equal
+   specificity, author rule wins) -- the element stayed visibly flexed even with .hidden = true. */
+.modal-overlay[hidden] { display: none; }
+.modal-pane {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.modal-pane h3 { margin: 0 0 12px; font-size: 15px; }
+.modal-pane textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  color: inherit;
+}
+.modal-actions { display: flex; gap: 10px; margin-top: 12px; }
+#summary-modal-status { margin: 8px 0 0; font-size: 12px; color: var(--text-muted); }
+
 /* Badges / pills */
 
 .pill {
@@ -158,11 +222,11 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
   white-space: nowrap;
 }
 
-.pill.pass, .pill.passed, .pill.ready, .pill.approved, .pill.video_ready, .pill.verified, .pill.published, .pill.done {
+.pill.pass, .pill.passed, .pill.ready, .pill.approved, .pill.video_ready, .pill.verified, .pill.published, .pill.done, .pill.ai_candidate {
   background: var(--pass-bg); color: var(--pass);
 }
-.pill.fail, .pill.failed, .pill.rejected { background: var(--fail-bg); color: var(--fail); }
-.pill.skip, .pill.pending, .pill.draft, .pill.producing, .pill.script_ready, .pill.voice_ready, .pill.visual_ready, .pill.unverified, .pill.not_published, .pill.publishing, .pill.warn {
+.pill.fail, .pill.failed, .pill.rejected, .pill.not_ai { background: var(--fail-bg); color: var(--fail); }
+.pill.skip, .pill.pending, .pill.draft, .pill.producing, .pill.script_ready, .pill.voice_ready, .pill.visual_ready, .pill.unverified, .pill.not_published, .pill.publishing, .pill.warn, .pill.duplicate, .pill.insufficient, .pill.thin {
   background: var(--skip-bg); color: var(--skip);
 }
 .pill.repeat-flagged { background: var(--fail-bg); color: var(--fail); }
@@ -189,6 +253,8 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
+  display: inline-block;
+  text-decoration: none;
 }
 
 .btn:hover { background: var(--surface-2); }
@@ -204,6 +270,24 @@ table.episode-list tr.row-link:hover { background: var(--surface-2); }
 .btn-linkedin { background: #0a66c2; color: #fff; border-color: #0a66c2; }
 .btn-linkedin:hover { background: #004182; }
 .btn-small { padding: 6px 12px; font-size: 12.5px; }
+
+/* Collected Stories: client-side filter bar (Primary + Secondary share one set of filters). */
+.collect-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0 18px;
+}
+.collect-filters input, .collect-filters select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: inherit;
+}
+.collect-filters input { flex: 1 1 200px; min-width: 140px; }
 
 /* Collect New Stories (dev/local only) */
 

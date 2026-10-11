@@ -44,6 +44,20 @@ function renderSourceLinkHtml(url) {
   `;
 }
 
+function truncateText(str, maxLen) {
+  if (!str) return "(empty)";
+  return str.length > maxLen ? `${str.slice(0, maxLen).trimEnd()}…` : str;
+}
+
+// Summary button's edit-history indicator: white (never edited) -> black (4+ Saves), a plain
+// linear grey gradient over [0, 4] edits, clamped at 4. Text flips to white past the midpoint so
+// it stays readable once the background gets dark.
+function summaryEditColor(count) {
+  const n = Math.max(0, Math.min(4, count || 0));
+  const grey = Math.round(255 * (1 - n / 4));
+  return { bg: `rgb(${grey}, ${grey}, ${grey})`, fg: n >= 2 ? "#ffffff" : "#000000" };
+}
+
 function formatDateTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -218,8 +232,11 @@ async function init() {
     appEnv = null; // Fail closed on the dashboard too -- unknown env hides the button.
   }
 
+  const params = new URLSearchParams(location.search);
   const episodeId = getEpisodeIdFromUrl();
-  if (episodeId) {
+  if (params.has("collected")) {
+    await renderCollectedStories(params.get("collected") || null);
+  } else if (episodeId) {
     await renderEpisodeStudio(episodeId);
   } else {
     await renderEpisodeList();
@@ -340,9 +357,12 @@ function wireCollectButton() {
     const hnLine = formatSourceLine("Hacker News", result.hackernews);
     const statusLabel = result.status === "success" ? "✓ Collection complete" : `Collection finished (${escapeHtml(result.status || "unknown")})`;
 
+    const collectedLink = result.collection_date
+      ? `<br><a href="?collected=${escapeHtml(result.collection_date)}">View collected stories &rarr;</a>`
+      : "";
     resultEl.innerHTML =
       `<strong>${statusLabel}</strong> -- target date ${escapeHtml(result.collection_date || "?")}<br>` +
-      `${rssLine}<br>${hnLine}`;
+      `${rssLine}<br>${hnLine}${collectedLink}`;
 
     collectCollapseTimer = setTimeout(() => {
       resultEl.innerHTML = "";
@@ -499,7 +519,120 @@ function wireProcessButton() {
 // reusable helper since all five stage buttons behave identically,
 // differing only in endpoint path and how to summarize that stage's
 // particular result dict.
+//
+// Shown on the Collected Stories page (not the episode list) -- that's where an editor is looking
+// at what Collect New Stories brought in and deciding whether/how to process it.
 // ---------------------------------------------------------
+
+function stageButtonsHtml() {
+  if (!isDevEnvironment(appEnv)) return "";
+  return `
+    <div class="panel collect-panel">
+      <p class="collect-stage-label">Run each processing step individually:</p>
+      <div class="collect-row">
+        <button class="btn btn-small" id="classify-btn" type="button">1. Classify</button>
+        <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
+        <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
+        <button class="btn btn-small" id="historical-dedup-btn" type="button">4. Historical-Dedup</button>
+        <button class="btn btn-small" id="verify-btn" type="button">5. Verify</button>
+        <button class="btn btn-small" id="rank-btn" type="button">6. Rank &amp; Select / Update</button>
+      </div>
+      <p id="classify-result" class="collect-result"></p>
+      <p id="dedup-stage-result" class="collect-result"></p>
+      <p id="content-dedup-result" class="collect-result"></p>
+      <p id="historical-dedup-result" class="collect-result"></p>
+      <p id="verify-result" class="collect-result"></p>
+      <p id="rank-result" class="collect-result"></p>
+
+      <p class="collect-stage-label">Testing only &mdash; temporary, remove once this feature is done:</p>
+      <div class="collect-row">
+        <button class="btn btn-small btn-warn" id="reset-to-collected-btn" type="button">Reset to just-collected</button>
+      </div>
+      <p id="reset-to-collected-result" class="collect-result"></p>
+    </div>
+  `;
+}
+
+// collectionDate: the date this Collected Stories page is showing -- every stage runs against
+// THAT date (not whatever "today" defaults to), so results always match what's on screen.
+// onAnyStageSuccess: re-fetches and re-renders both containers after EVERY stage (not just Rank &
+// Select), since classify/dedup/verify all change the status pills secondary shows.
+function wireStageButtons(collectionDate, onAnyStageSuccess) {
+  if (!isDevEnvironment(appEnv)) return;
+  const dateQS = `target_date=${encodeURIComponent(collectionDate)}`;
+  wireStageButton({
+    btnId: "classify-btn", resultId: "classify-result", path: `/processing/classify?${dateQS}`,
+    formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates, ${r.not_ai ?? "?"} not AI.`,
+    onSuccess: onAnyStageSuccess,
+  });
+  wireStageButton({
+    btnId: "dedup-stage-btn", resultId: "dedup-stage-result", path: `/processing/dedup?${dateQS}`,
+    formatResult: (r) => `Checked ${r.checked ?? "?"}, found ${r.duplicates_found ?? "?"} duplicates.`,
+    onSuccess: onAnyStageSuccess,
+  });
+  wireStageButton({
+    btnId: "content-dedup-btn", resultId: "content-dedup-result", path: `/processing/content-dedup?${dateQS}`,
+    formatResult: (r) =>
+      `Fetched ${r.fetch_success ?? "?"}/${r.fetch_attempted ?? "?"} articles -- ` +
+      `${r.content_duplicates_found ?? "?"} content duplicates.`,
+    onSuccess: onAnyStageSuccess,
+  });
+  wireStageButton({
+    btnId: "historical-dedup-btn", resultId: "historical-dedup-result", path: `/processing/historical-dedup?${dateQS}`,
+    // unrelated/corpus_size surfaced alongside duplicates/new_developments: with an empty corpus
+    // (no approved/published episode exists yet before this date) every candidate falls into
+    // "unrelated" rather than getting a real duplicate/new_development verdict, which otherwise
+    // looked identical on screen to "checked everything, found zero repeats".
+    formatResult: (r) => r.skipped_reason
+      ? `Skipped: ${escapeHtml(r.skipped_reason)}`
+      : `${r.duplicates ?? "?"} repeats of published stories, ${r.new_developments ?? "?"} new developments, ` +
+        `${r.already_decided ?? 0} already decided, ${r.unrelated ?? 0} unrelated ` +
+        `(of ${r.candidates ?? "?"} candidates, corpus size ${r.corpus_size ?? "?"}).`,
+    onSuccess: onAnyStageSuccess,
+  });
+  wireStageButton({
+    btnId: "verify-btn", resultId: "verify-result", path: `/processing/verify?${dateQS}`,
+    formatResult: (r) => `${r.verified ?? "?"} verified / ${r.unverified ?? "?"} unverified (of ${r.processed ?? "?"}).`,
+    onSuccess: onAnyStageSuccess,
+  });
+  wireStageButton({
+    btnId: "rank-btn", resultId: "rank-result", path: `/processing/rank?episode_date=${encodeURIComponent(collectionDate)}`,
+    formatResult: (r) => r.created
+      ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
+      : r.updated
+        ? `${formatRankUpdate(r)}`
+        : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
+    onSuccess: onAnyStageSuccess,
+  });
+  // Synchronous endpoint (plain deletes, no Celery task) -- no queue/poll, just confirm, call,
+  // refresh. Temporary testing button; see reset_to_collected's docstring in app/main.py.
+  const resetBtn = document.getElementById("reset-to-collected-btn");
+  const resetResultEl = document.getElementById("reset-to-collected-result");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      if (!confirm(
+        `Reset ${collectionDate} to just-collected? This permanently deletes classification, ` +
+        `dedup, verification and any episode/selection for this date (raw collected items are kept).`
+      )) {
+        return;
+      }
+      resetBtn.disabled = true;
+      resetResultEl.textContent = "";
+      try {
+        const r = await apiPost(`/processing/reset-to-collected?${dateQS}`);
+        resetResultEl.textContent =
+          `Reset done -- ${r.stories_deleted} stories, ${r.episodes_deleted} episode(s), ` +
+          `${r.episode_stories_deleted} episode_stories, ${r.story_content_deleted} story_content, ` +
+          `${r.historical_relations_deleted} historical relations deleted. ${r.news_items_kept} news items kept.`;
+        setTimeout(onAnyStageSuccess, RESULT_COLLAPSE_MS);
+      } catch (err) {
+        resetResultEl.textContent = `Failed: ${err.message}`;
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+  }
+}
 
 function wireStageButton({ btnId, resultId, path, formatResult, onSuccess }) {
   const btn = document.getElementById(btnId);
@@ -573,6 +706,427 @@ function wireStageButton({ btnId, resultId, path, formatResult, onSuccess }) {
 }
 
 // ---------------------------------------------------------
+// Collected Stories -- raw list of what Collect New Stories brought in for one
+// collection_date (GET /api/v1/raw/news-items), shown before/alongside processing.
+// ---------------------------------------------------------
+
+// Pill label legend for the abbreviations used below -- see the <p class="collect-legend"> block
+// rendered once near the top of the page in renderCollectedStories.
+const DEDUP_PILL_LEGEND = [
+  ["dedup of #N", "same-day title dedup (stage 2, Dedup) linked this to canonical story #N"],
+  ["con-dup of #N", "Content-Dedup (stage 3, same-day-v3 content similarity) linked this to canonical story #N"],
+  ["con-insuf", "Content-Dedup judged this story's source text has too little real content for a briefing (excluded from ranking)"],
+  ["con-thin", "Content-Dedup judged this story's source text usable but marginal -- not excluded from ranking"],
+  ["his-dup of #N", "Historical-Dedup (stage 4) found this repeats already-published story #N"],
+];
+
+function newsItemRowCells(item, showNotRequired) {
+  const isDup = !!item.canonical_story_id;
+  // dedup_reason's own text tells the two same-day stages apart: content-dedup's same_day.py
+  // always prefixes with "same_day_v<N>[...]" (DedupLink.dedup_reason); the classic Dedup stage
+  // (app/filters/dedup.py::find_duplicate_match) never does -- its reason always starts with
+  // "title_sequence_similarity=". No new backend field needed, this is just reading the format.
+  const isContentDedup = isDup && /^same_day_v\d/.test(item.dedup_reason || "");
+  const dupNote = isDup
+    ? ` <span class="pill duplicate" title="${escapeHtml(item.dedup_reason || "")}">${isContentDedup ? "con-dup" : "dedup"} of #${item.canonical_story_id}</span>`
+    : "";
+  // Separate from dedup: source_sufficiency is Content-Dedup's "could this even support a
+  // source-grounded briefing" check (app/tasks/content_dedup.py::assess_source_sufficiency) --
+  // no canonical_story_id involved, so it needs its own pill rather than piggybacking on dupNote.
+  const insufficientNote = item.source_sufficiency === "insufficient"
+    ? ` <span class="pill insufficient" title="${escapeHtml(item.sufficiency_reason || "")}">con-insuf</span>`
+    : "";
+  // "thin" is a softer, non-excluding sibling of "insufficient" (same assess_source_sufficiency
+  // check, see app/content/briefing/sufficiency.py's THIN) -- usable but marginal source text,
+  // distinct enough to need its own pill rather than folding into con-insuf.
+  const thinNote = item.source_sufficiency === "thin"
+    ? ` <span class="pill thin" title="${escapeHtml(item.sufficiency_reason || "")}">con-thin</span>`
+    : "";
+  // Historical-Dedup verdicts live in editorial.historical_story_relations, a separate mechanism
+  // from canonical_story_id (same-day dedup) entirely -- see _historical_relations in main.py.
+  const histDupNote = item.historical_duplicate_of
+    ? ` <span class="pill duplicate" title="${escapeHtml(item.historical_reason || "")}">his-dup of #${item.historical_duplicate_of}</span>`
+    : "";
+  const relevance = item.ai_relevance || "pending";
+  // verification_reason IS the evidence (e.g. "Cross-source confirmed by 2 other outlet(s)." or
+  // "Primary/official source (...) -- self-verifying...", see app/verification/engine.py's
+  // verify_story) -- folded into the Relevance cell as its own pill rather than a dedicated
+  // column, same tooltip-carries-the-evidence pattern as the dedup/sufficiency pills.
+  const verification = item.verification_status || "pending";
+  const verificationNote = ` <span class="pill ${verification}" title="${escapeHtml(item.verification_reason || "Not yet processed by Verify.")}">${escapeHtml(verification)}</span>`;
+  return `
+    <td>#${item.id}</td>
+    <td>${escapeHtml(item.source_name)}</td>
+    <td><span class="pill">${escapeHtml(item.source_type)}</span></td>
+    <td${isDup ? ' class="cell-duplicate-title"' : ""}>${isDup ? "&#8627; " : ""}<a href="${escapeHtml(item.canonical_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></td>
+    <td class="cell-summary">
+      <p class="summary-preview" data-id="${item.id}" title="${escapeAttr(item.raw_summary || "")}">${escapeHtml(truncateText(item.raw_summary, 90))}</p>
+      <button
+        class="btn btn-small summary-edit-btn" data-id="${item.id}" type="button"
+        style="background:${summaryEditColor(item.raw_summary_edit_count).bg};color:${summaryEditColor(item.raw_summary_edit_count).fg};"
+        title="Edited ${item.raw_summary_edit_count || 0} time${item.raw_summary_edit_count === 1 ? "" : "s"}"
+      >Summary</button>
+      ${showNotRequired ? `<button class="btn btn-small btn-warn not-required-btn" data-id="${item.id}" type="button" title="Move to Secondary -- removes it from Primary (and the real episode selection, if any)">Not Required</button>` : ""}
+      <button class="btn btn-small move-to-rank-btn" data-id="${item.id}" type="button" title="Force onto the board regardless of classification/sufficiency/dedup status -- real episode selection, picked up by Produce">Move to Rank</button>
+    </td>
+    <td>${item.published_at ? formatDateTime(item.published_at) : "&mdash;"}</td>
+    <td>${formatDateTime(item.collected_at)}</td>
+    <td><span class="pill ${relevance}">${escapeHtml(relevance)}</span>${dupNote}${insufficientNote}${thinNote}${histDupNote}${verificationNote}</td>
+  `;
+}
+
+function primaryStatusCounts(primaryItems) {
+  const counts = { primary: 0, backup: 0, needs_source: 0 };
+  for (const item of primaryItems) {
+    if (item.selection_status in counts) {
+      counts[item.selection_status] += 1;
+    }
+  }
+  return counts;
+}
+
+function renderPrimaryRows(items) {
+  return items.map((item, i) => `
+    <tr class="row-${item.selection_status}">
+      <td>${i + 1}</td>
+      ${newsItemRowCells(item, true)}
+    </tr>
+  `).join("");
+}
+
+// "thin" sorted to the top server-side (see list_news_items) -- "insufficient" moved to Primary
+// as "needs_source" instead, so it's no longer in this list at all.
+function renderSecondaryRows(items) {
+  return items.map((item, i) => {
+    const flagged = item.ai_relevance === "ai_candidate" && item.source_sufficiency === "thin";
+    return `
+    <tr${flagged ? ' class="row-flagged"' : ""}>
+      <td>${i + 1}</td>
+      ${newsItemRowCells(item)}
+    </tr>
+  `;
+  }).join("");
+}
+
+// Same detection rules as the dedup/con-dup/con-insuf/con-thin/his-dup pills in
+// newsItemRowCells, pulled out so the "Pill" filter stays in sync with what's actually rendered
+// instead of re-deriving its own copy. An item can carry more than one at once.
+function collectedStoriesPillKinds(item) {
+  const kinds = [];
+  if (item.canonical_story_id) {
+    kinds.push(/^same_day_v\d/.test(item.dedup_reason || "") ? "con-dup" : "dedup");
+  }
+  if (item.source_sufficiency === "insufficient") kinds.push("con-insuf");
+  if (item.source_sufficiency === "thin") kinds.push("con-thin");
+  if (item.historical_duplicate_of) kinds.push("his-dup");
+  return kinds;
+}
+
+// Client-side only -- data.primary/data.secondary are already fully loaded, no reason to round-
+// trip the server just to narrow what's shown. q matches source name or title (substring,
+// case-insensitive); the rest are exact matches against fields already in the payload.
+function collectedStoriesMatch(item, { q, relevance, verification, status, pill }) {
+  if (q) {
+    const hay = `${item.source_name || ""} ${item.title || ""}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  if (relevance && (item.ai_relevance || "pending") !== relevance) return false;
+  if (verification && (item.verification_status || "pending") !== verification) return false;
+  if (status && item.selection_status !== status) return false;
+  if (pill && !collectedStoriesPillKinds(item).includes(pill)) return false;
+  return true;
+}
+
+async function renderCollectedStories(collectionDate) {
+  app.innerHTML = '<p class="loading">Loading collected stories…</p>';
+
+  let data;
+  try {
+    const qs = collectionDate ? `?collection_date=${encodeURIComponent(collectionDate)}` : "";
+    data = await apiGet(`/raw/news-items${qs}`);
+  } catch (err) {
+    app.innerHTML = `<p class="error">Failed to load collected stories: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  const primaryRows = renderPrimaryRows(data.primary);
+  const secondaryRows = renderSecondaryRows(data.secondary);
+
+  const counts = primaryStatusCounts(data.primary);
+  const statusStrip = data.episode_locked
+    ? `Episode #${data.episode_id} is already ${escapeHtml(data.episode_status)} &mdash; locked, not editable here. The pool below is shown as if nothing were selected.`
+    : `${counts.primary} primary &middot; ${counts.backup} backup &middot; ${counts.needs_source} needs source &middot; ${data.secondary_count} in pool` +
+      (data.primary_is_preview ? " &mdash; live preview, Rank &amp; Select hasn't run yet, nothing is saved." : "");
+
+  const legend = DEDUP_PILL_LEGEND
+    .map(([label, meaning]) => `<span class="pill duplicate" title="${escapeHtml(meaning)}">${escapeHtml(label)}</span>`)
+    .join(" ");
+
+  app.innerHTML = `
+    <p><a href="?">&larr; Back to episodes</a></p>
+    <h1>Collected Stories &mdash; ${escapeHtml(data.collection_date)}</h1>
+    ${stageButtonsHtml()}
+    <p class="collect-legend collect-stage-label">Pill legend (hover each for detail): ${legend}</p>
+
+    <div class="collect-filters">
+      <input id="cs-filter-q" type="text" placeholder="Filter by source or title…">
+      <select id="cs-filter-relevance">
+        <option value="">Relevance: all</option>
+        <option value="ai_candidate">ai_candidate</option>
+        <option value="not_ai">not_ai</option>
+        <option value="pending">pending</option>
+      </select>
+      <select id="cs-filter-verification">
+        <option value="">Verified: all</option>
+        <option value="verified">verified</option>
+        <option value="unverified">unverified</option>
+        <option value="pending">pending</option>
+      </select>
+      <select id="cs-filter-status">
+        <option value="">Status: all</option>
+        <option value="primary">primary</option>
+        <option value="backup">backup</option>
+        <option value="needs_source">needs_source</option>
+        <option value="duplicate">duplicate</option>
+      </select>
+      <select id="cs-filter-pill">
+        <option value="">Pill: all</option>
+        <option value="dedup">dedup</option>
+        <option value="con-dup">con-dup</option>
+        <option value="con-insuf">con-insuf</option>
+        <option value="con-thin">con-thin</option>
+        <option value="his-dup">his-dup</option>
+      </select>
+      <span id="cs-filter-count" class="collect-stage-label" style="margin:0;"></span>
+    </div>
+
+    <h2>Primary ${data.episode_id && !data.primary_is_preview ? `&mdash; episode #${data.episode_id} (${escapeHtml(data.episode_status)})` : ""}</h2>
+    <p class="collect-stage-label">${statusStrip}</p>
+    <table class="episode-list">
+      <thead>
+        <tr><th>S.No</th><th>ID</th><th>Source</th><th>Type</th><th>Title</th><th>Summary</th><th>Published</th><th>Collected</th><th>Relevance</th></tr>
+      </thead>
+      <tbody id="cs-primary-tbody">${primaryRows || '<tr><td colspan="9">Primary is empty.</td></tr>'}</tbody>
+    </table>
+
+    <h2>Secondary</h2>
+    <p class="collect-stage-label">${data.secondary_count} stor${data.secondary_count === 1 ? "y" : "ies"} in the pool.</p>
+    <table class="episode-list">
+      <thead>
+        <tr><th>S.No</th><th>ID</th><th>Source</th><th>Type</th><th>Title</th><th>Summary</th><th>Published</th><th>Collected</th><th>Relevance</th></tr>
+      </thead>
+      <tbody id="cs-secondary-tbody">${secondaryRows || '<tr><td colspan="9">Nothing left in the pool.</td></tr>'}</tbody>
+    </table>
+  `;
+
+  wireStageButtons(data.collection_date, () => renderCollectedStories(data.collection_date));
+  wireCollectedStoriesFilters(data);
+  wireSummaryEditing(data);
+}
+
+function wireCollectedStoriesFilters(data) {
+  const qEl = document.getElementById("cs-filter-q");
+  const relEl = document.getElementById("cs-filter-relevance");
+  const verEl = document.getElementById("cs-filter-verification");
+  const statusEl = document.getElementById("cs-filter-status");
+  const pillEl = document.getElementById("cs-filter-pill");
+  const countEl = document.getElementById("cs-filter-count");
+  const primaryTbody = document.getElementById("cs-primary-tbody");
+  const secondaryTbody = document.getElementById("cs-secondary-tbody");
+
+  function apply() {
+    const filters = {
+      q: qEl.value.trim().toLowerCase(),
+      relevance: relEl.value,
+      verification: verEl.value,
+      status: statusEl.value,
+      pill: pillEl.value,
+    };
+    const anyFilterSet = filters.q || filters.relevance || filters.verification || filters.status || filters.pill;
+
+    const primaryMatches = data.primary.filter((item) => collectedStoriesMatch(item, filters));
+    // Secondary rows have no selection_status at all -- a status filter should empty this table,
+    // not ignore the filter, so no special-case here: collectedStoriesMatch already returns false.
+    const secondaryMatches = data.secondary.filter((item) => collectedStoriesMatch(item, filters));
+
+    primaryTbody.innerHTML = renderPrimaryRows(primaryMatches) || '<tr><td colspan="9">No matches.</td></tr>';
+    secondaryTbody.innerHTML = renderSecondaryRows(secondaryMatches) || '<tr><td colspan="9">No matches.</td></tr>';
+    countEl.textContent = anyFilterSet
+      ? `${primaryMatches.length} / ${data.primary.length} primary, ${secondaryMatches.length} / ${data.secondary.length} secondary match`
+      : "";
+  }
+
+  qEl.addEventListener("input", apply);
+  relEl.addEventListener("change", apply);
+  verEl.addEventListener("change", apply);
+  statusEl.addEventListener("change", apply);
+  pillEl.addEventListener("change", apply);
+}
+
+// Single shared modal, created once and appended to <body> (outside #app, so
+// renderCollectedStories's innerHTML replacement never touches it) -- its Save/Close/outside-
+// click/Escape handlers are wired exactly once (guarded by summaryModalEl already being set).
+// What IS re-wired per render is just the "which button opened it" delegation on #app, same
+// remove-then-add pattern as the filters, since #app's content is fully replaced each render.
+let summaryModalEl = null;
+let summaryModalCurrentId = null;
+let currentCollectedStoriesData = null; // refreshed every render; the Save handler always reads the latest
+let csSummaryOpenHandler = null;
+
+function findCollectedStoriesItem(id) {
+  if (!currentCollectedStoriesData) return null;
+  return (
+    currentCollectedStoriesData.primary.find((it) => it.id === id) ||
+    currentCollectedStoriesData.secondary.find((it) => it.id === id)
+  );
+}
+
+function closeSummaryModal() {
+  if (summaryModalEl) summaryModalEl.hidden = true;
+  summaryModalCurrentId = null;
+}
+
+async function saveSummaryModal() {
+  const id = summaryModalCurrentId;
+  if (id == null || !summaryModalEl) return;
+  const textarea = summaryModalEl.querySelector("#summary-modal-textarea");
+  const status = summaryModalEl.querySelector("#summary-modal-status");
+  const saveBtn = summaryModalEl.querySelector("#summary-modal-save");
+  const value = textarea.value;
+
+  saveBtn.disabled = true;
+  status.textContent = "Saving…";
+  try {
+    const result = await apiSend("PATCH", `/raw/news-items/${id}`, { raw_summary: value });
+    const item = findCollectedStoriesItem(id);
+    if (item) {
+      item.raw_summary = value; // keeps later filter re-renders showing the saved text
+      item.raw_summary_edit_count = result.raw_summary_edit_count;
+    }
+    const preview = document.querySelector(`.summary-preview[data-id="${id}"]`);
+    if (preview) {
+      preview.textContent = truncateText(value, 90); // .textContent, not innerHTML -- auto-escaped
+      preview.title = value || "";
+    }
+    const editBtn = document.querySelector(`.summary-edit-btn[data-id="${id}"]`);
+    if (editBtn) {
+      const { bg, fg } = summaryEditColor(result.raw_summary_edit_count);
+      editBtn.style.background = bg;
+      editBtn.style.color = fg;
+      const n = result.raw_summary_edit_count;
+      editBtn.title = `Edited ${n} time${n === 1 ? "" : "s"}`;
+    }
+    status.textContent = "Saved.";
+    setTimeout(closeSummaryModal, 700);
+  } catch (err) {
+    status.textContent = `Failed: ${err.message}`;
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function ensureSummaryModal() {
+  if (summaryModalEl) return summaryModalEl;
+
+  const el = document.createElement("div");
+  el.className = "modal-overlay";
+  el.hidden = true;
+  el.innerHTML = `
+    <div class="modal-pane" role="dialog" aria-modal="true" aria-labelledby="summary-modal-label">
+      <h3 id="summary-modal-label">Summary &mdash; <span id="summary-modal-idlabel"></span></h3>
+      <textarea id="summary-modal-textarea" rows="10"></textarea>
+      <div class="modal-actions">
+        <button id="summary-modal-save" class="btn btn-small" type="button">Save</button>
+        <button id="summary-modal-close" class="btn btn-small btn-ghost" type="button">Close</button>
+      </div>
+      <p id="summary-modal-status" class="collect-result"></p>
+    </div>
+  `;
+  document.body.appendChild(el);
+
+  el.querySelector("#summary-modal-save").addEventListener("click", saveSummaryModal);
+  el.querySelector("#summary-modal-close").addEventListener("click", closeSummaryModal);
+  el.addEventListener("click", (event) => {
+    if (event.target === el) closeSummaryModal(); // click on the dimmed backdrop, not the pane
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !el.hidden) closeSummaryModal();
+  });
+
+  summaryModalEl = el;
+  return el;
+}
+
+function openSummaryModal(id) {
+  const item = findCollectedStoriesItem(id);
+  if (!item) return;
+  const el = ensureSummaryModal();
+  summaryModalCurrentId = id;
+  el.querySelector("#summary-modal-idlabel").textContent = `#${id} — ${item.source_name}`;
+  el.querySelector("#summary-modal-textarea").value = item.raw_summary || "";
+  el.querySelector("#summary-modal-status").textContent = "";
+  el.hidden = false;
+  el.querySelector("#summary-modal-textarea").focus();
+}
+
+// "Not Required" (Primary rows only) -- POST .../exclude, then a full re-fetch+re-render, since
+// the row has to actually move from the Primary table to the Secondary one, not just restyle in
+// place. Reuses the same re-render callback the stage buttons already pass to themselves.
+async function handleNotRequiredClick(event, collectionDate) {
+  const btn = event.target.closest(".not-required-btn");
+  if (!btn || btn.disabled) return;
+  const id = btn.dataset.id;
+  btn.disabled = true;
+  btn.textContent = "Moving…";
+  try {
+    await apiSend("POST", `/stories/${id}/exclude`, { excluded: true });
+    await renderCollectedStories(collectionDate);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "Not Required";
+    alert(`Failed to move story ${id} to Secondary: ${err.message}`);
+  }
+}
+
+// Available on every row in BOTH tables -- a Secondary row moving to Primary needs the same
+// full re-render as a Primary row moving to Secondary (handleNotRequiredClick above).
+async function handleMoveToRankClick(event, collectionDate) {
+  const btn = event.target.closest(".move-to-rank-btn");
+  if (!btn || btn.disabled) return;
+  const id = btn.dataset.id;
+  btn.disabled = true;
+  btn.textContent = "Moving…";
+  try {
+    await apiSend("POST", `/stories/${id}/force-rank`, {});
+    await renderCollectedStories(collectionDate);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "Move to Rank";
+    alert(`Failed to move story ${id} onto the board: ${err.message}`);
+  }
+}
+
+function wireSummaryEditing(data) {
+  currentCollectedStoriesData = data;
+
+  if (csSummaryOpenHandler) app.removeEventListener("click", csSummaryOpenHandler);
+  csSummaryOpenHandler = (event) => {
+    if (event.target.closest(".summary-edit-btn")) {
+      openSummaryModal(Number(event.target.closest(".summary-edit-btn").dataset.id));
+      return;
+    }
+    if (event.target.closest(".not-required-btn")) {
+      handleNotRequiredClick(event, data.collection_date);
+      return;
+    }
+    if (event.target.closest(".move-to-rank-btn")) {
+      handleMoveToRankClick(event, data.collection_date);
+    }
+  };
+  app.addEventListener("click", csSummaryOpenHandler);
+}
+
+// ---------------------------------------------------------
 // Episode list
 // ---------------------------------------------------------
 
@@ -593,25 +1147,10 @@ async function renderEpisodeList() {
         <div class="collect-row">
           <button class="btn" id="collect-btn" type="button">Collect New Stories</button>
           <button class="btn" id="process-btn" type="button">Process / Update Episode (all steps)</button>
+          <a class="btn btn-ghost" href="?collected=">View Collected Stories</a>
         </div>
         <p id="collect-result" class="collect-result"></p>
         <p id="process-result" class="collect-result"></p>
-
-        <p class="collect-stage-label">Or run each processing step individually:</p>
-        <div class="collect-row">
-          <button class="btn btn-small" id="classify-btn" type="button">1. Classify</button>
-          <button class="btn btn-small" id="dedup-stage-btn" type="button">2. Dedup</button>
-          <button class="btn btn-small" id="content-dedup-btn" type="button">3. Content-Dedup</button>
-          <button class="btn btn-small" id="historical-dedup-btn" type="button">4. Historical-Dedup</button>
-          <button class="btn btn-small" id="verify-btn" type="button">5. Verify</button>
-          <button class="btn btn-small" id="rank-btn" type="button">6. Rank &amp; Select / Update</button>
-        </div>
-        <p id="classify-result" class="collect-result"></p>
-        <p id="dedup-stage-result" class="collect-result"></p>
-        <p id="content-dedup-result" class="collect-result"></p>
-        <p id="historical-dedup-result" class="collect-result"></p>
-        <p id="verify-result" class="collect-result"></p>
-        <p id="rank-result" class="collect-result"></p>
       </div>
     `
     : "";
@@ -620,40 +1159,6 @@ async function renderEpisodeList() {
     if (!isDevEnvironment(appEnv)) return;
     wireCollectButton();
     wireProcessButton();
-    wireStageButton({
-      btnId: "classify-btn", resultId: "classify-result", path: "/processing/classify",
-      formatResult: (r) => `Classified ${r.classified ?? "?"}, ${r.ai_candidates ?? "?"} AI candidates, ${r.not_ai ?? "?"} not AI.`,
-    });
-    wireStageButton({
-      btnId: "dedup-stage-btn", resultId: "dedup-stage-result", path: "/processing/dedup",
-      formatResult: (r) => `Checked ${r.checked ?? "?"}, found ${r.duplicates_found ?? "?"} duplicates.`,
-    });
-    wireStageButton({
-      btnId: "content-dedup-btn", resultId: "content-dedup-result", path: "/processing/content-dedup",
-      formatResult: (r) =>
-        `Fetched ${r.fetch_success ?? "?"}/${r.fetch_attempted ?? "?"} articles -- ` +
-        `${r.content_duplicates_found ?? "?"} content duplicates.`,
-    });
-    wireStageButton({
-      btnId: "historical-dedup-btn", resultId: "historical-dedup-result", path: "/processing/historical-dedup",
-      formatResult: (r) => r.skipped_reason
-        ? `Skipped: ${escapeHtml(r.skipped_reason)}`
-        : `${r.duplicates ?? "?"} repeats of published stories, ${r.new_developments ?? "?"} new developments, ` +
-          `${r.already_decided ?? 0} already decided (of ${r.candidates ?? "?"} candidates).`,
-    });
-    wireStageButton({
-      btnId: "verify-btn", resultId: "verify-result", path: "/processing/verify",
-      formatResult: (r) => `${r.verified ?? "?"} verified / ${r.unverified ?? "?"} unverified (of ${r.processed ?? "?"}).`,
-    });
-    wireStageButton({
-      btnId: "rank-btn", resultId: "rank-result", path: "/processing/rank",
-      formatResult: (r) => r.created
-        ? `Created episode #${r.episode_id} -- ${r.primary_selected ?? "?"} primary, ${r.backup_selected ?? "?"} backup.`
-        : r.updated
-          ? `${formatRankUpdate(r)}`
-          : `Episode not changed (${escapeHtml(r.reason || "unknown")}${r.episode_id ? `, episode #${r.episode_id}` : ""}).`,
-      onSuccess: () => renderEpisodeList(),
-    });
   };
 
   if (!episodes.length) {
