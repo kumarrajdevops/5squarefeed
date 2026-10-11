@@ -54,6 +54,53 @@ def _persist_briefing_meta(content: StoryContent, briefing: dict | None) -> None
     content.script_meta = json.dumps(briefing.get("meta"), default=str)
 
 
+def ensure_script(db, story: NewsItem, content: StoryContent) -> bool:
+    """
+    Script/summary only -- the first half of ensure_script_and_voice below, pulled out so a
+    script-only stage (dashboard's "Summary" button, run after Rank & Select, before voice/video)
+    can reuse the exact same generation + the same "skip regeneration if content.script_text
+    already exists" guard (CLAUDE.md rule 1 -- a human edit via the dashboard's edit panel must
+    survive a later run) rather than duplicating it. ensure_script_and_voice calls this first,
+    unchanged behavior for every existing caller.
+
+    Returns True if a script exists by the end of this call (already did, or just generated),
+    False if generation failed or the source was too thin to brief.
+    """
+    if content.script_text:
+        return True
+
+    try:
+        kwargs = {}
+        corroborating = load_corroborating(db, story)
+        if corroborating:
+            kwargs["corroborating"] = corroborating
+        script = generate_script(
+            title=story.title, raw_summary=story.raw_summary, raw_content=story.raw_content, **kwargs
+        )
+        briefing = script.get("briefing")
+        _persist_briefing_meta(content, briefing)
+        if not script["script_text"]:
+            # Too thin to brief: never pad it. Left for a manual swap (QA flags it).
+            content.headline = script["headline"]
+            content.status = "failed"
+            content.error_message = "[script] insufficient for briefing: " + (
+                (briefing or {}).get("reason") or "no usable source text"
+            )
+            db.commit()
+            print(f"[content] story {story.id} insufficient for briefing")
+            return False
+        content.headline = script["headline"]
+        content.summary = script["summary"]
+        content.script_text = script["script_text"]
+        content.status = "script_ready"
+        content.error_message = None
+        db.commit()
+        return True
+    except Exception as exc:
+        mark_content_failed(db, content, "script", exc)
+        return False
+
+
 def ensure_script_and_voice(db, story: NewsItem, content: StoryContent) -> bool:
     """
     Script, then voice/audio/caption-timing -- the real prerequisite the
@@ -73,36 +120,8 @@ def ensure_script_and_voice(db, story: NewsItem, content: StoryContent) -> bool:
     Returns True if script + voice are ready, False if either stage
     failed.
     """
-    if not content.script_text:
-        try:
-            kwargs = {}
-            corroborating = load_corroborating(db, story)
-            if corroborating:
-                kwargs["corroborating"] = corroborating
-            script = generate_script(
-                title=story.title, raw_summary=story.raw_summary, raw_content=story.raw_content, **kwargs
-            )
-            briefing = script.get("briefing")
-            _persist_briefing_meta(content, briefing)
-            if not script["script_text"]:
-                # Too thin to brief: never pad it. Left for a manual swap (QA flags it).
-                content.headline = script["headline"]
-                content.status = "failed"
-                content.error_message = "[script] insufficient for briefing: " + (
-                    (briefing or {}).get("reason") or "no usable source text"
-                )
-                db.commit()
-                print(f"[content] story {story.id} insufficient for briefing")
-                return False
-            content.headline = script["headline"]
-            content.summary = script["summary"]
-            content.script_text = script["script_text"]
-            content.status = "script_ready"
-            content.error_message = None
-            db.commit()
-        except Exception as exc:
-            mark_content_failed(db, content, "script", exc)
-            return False
+    if not ensure_script(db, story, content):
+        return False
 
     if content.audio_path and content.caption_segments:
         return True
